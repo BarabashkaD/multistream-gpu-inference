@@ -1,0 +1,14 @@
+# Native Windows dependencies. Do not copy a WSL venv.
+# Installed by setup_windows.ps1; see "Native Windows" in README.md for the tested configuration.
+# PyPI has no CUDA torch wheels for Windows, so torch comes from the PyTorch index.
+--extra-index-url https://download.pytorch.org/whl/cu130
+ultralytics==8.4.190
+onnxruntime-gpu==1.31.1
+opencv-python==5.0.0.93
+onnx==1.23.2
+numpy==2.5.4
+torch==2.14.1+cu130
+torchvision==0.29.1+cu130
+lap==0.5.13
+ml-dtypes==0.6.0
+PyNvVideoCodec==2.2.3

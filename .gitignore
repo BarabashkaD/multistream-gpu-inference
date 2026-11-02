@@ -1,0 +1,16 @@
+# Local environment and generated output
+.venv/
+.ultralytics/
+runs/
+__pycache__/
+*.pyc
+
+# Local data, models, environments and results
+data/
+models/
+results/
+*.pt
+*.onnx
+*.tar
+hang.log
+.pytest_cache/

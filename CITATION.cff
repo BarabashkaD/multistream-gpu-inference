@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "multistream-gpu-inference (v1: single stream)"
+abstract: "Single-stream YOLO26n detection and ByteTrack tracking on one NVIDIA GPU, decoding a video held in host RAM with NVDEC and running the detector in ONNX Runtime with CUDA."
+authors:
+  - family-names: "Veremeev"
+    given-names: "Dmitry"
+    alias: "BarabashkaD"
+repository-code: "https://github.com/BarabashkaD/multistream-gpu-inference/tree/v1-single-stream"
+license: "AGPL-3.0-or-later"
+version: "1.0"
+date-released: "2026-11-06"

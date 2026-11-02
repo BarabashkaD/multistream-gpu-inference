@@ -1,0 +1,51 @@
+multistream-gpu-inference (v1: single stream)
+Copyright (C) 2026 Dmitry Veremeev <https://github.com/BarabashkaD>
+
+Dmitry Veremeev is the author of this implementation and the designer of its
+architecture and performance optimisations.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version, with the additional terms below. This program is distributed in
+the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+the GNU Affero General Public License in the file LICENSE for more details.
+
+Additional terms under section 7 of the GNU Affero General Public License,
+version 3
+
+1. Author attribution (section 7(b)). Every copy and every modified version of
+   this program, in source or object form, must preserve the copyright and
+   author lines of this NOTICE file and the copyright and author lines in the
+   source file headers. Where a work based on this program displays
+   Appropriate Legal Notices, the attribution "Dmitry Veremeev" must be
+   preserved in them.
+2. Origin of modified versions (section 7(c)). Modified versions must be
+   marked as changed and must not be presented as the original version or as
+   the work of the original author.
+3. Additional permission for NVIDIA libraries. As a special exception, the
+   copyright holder gives permission to link or combine this program with the
+   NVIDIA CUDA runtime and CUDA libraries (including cuBLAS, cuBLASLt, cuDNN,
+   cuFFT, cuFile, cuRAND, cuSOLVER, cuSPARSE, cuSPARSELt, CUPTI, NCCL, NVRTC,
+   nvJitLink, NVSHMEM and NVTX), the NVIDIA driver libraries (including the
+   CUDA driver API, NVML and NVCUVID), the NVIDIA Video Codec SDK (NVDEC) and
+   PyNvVideoCodec, and to convey the resulting work. The terms of this
+   License continue to apply to the rest of the work, but not to those
+   libraries. This permission covers only code whose copyright is held by
+   Dmitry Veremeev; it does not change the license of third-party components
+   such as Ultralytics. Anyone who conveys this program may remove this
+   permission from their copies, as section 7 allows.
+
+Credits
+- Ultralytics YOLO26 and the Ultralytics ByteTrack tracker, used through the
+  ultralytics package (AGPL-3.0): https://github.com/ultralytics/ultralytics
+- ByteTrack: Y. Zhang et al., "ByteTrack: Multi-Object Tracking by Associating
+  Every Detection Box", ECCV 2022: https://github.com/ifzhang/ByteTrack
+- Test video: "Busy urban intersection from above" by Scott Precious,
+  Pexels video 36304379, used under the Pexels license:
+  https://www.pexels.com/video/busy-urban-intersection-from-above-36304379/
+
+The video clip and the model weights are not part of this repository. They are
+downloaded by the user under their own licenses. THIRD_PARTY_NOTICES.md lists
+the licenses of the dependencies.

@@ -1,0 +1,10 @@
+ultralytics==8.4.190
+onnxruntime-gpu==1.31.1
+opencv-python==5.0.0.93
+onnx==1.23.2
+numpy==2.5.4
+torch==2.14.1
+torchvision==0.29.1
+lap==0.5.13
+ml-dtypes==0.6.0
+PyNvVideoCodec==2.2.3
