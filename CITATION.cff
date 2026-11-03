@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "multistream-gpu-inference (v2: bundle pipeline)"
+abstract: "Single-stream YOLO26n detection and ByteTrack tracking on one NVIDIA GPU as a threaded pipeline: NVDEC decoding, frame bundles leased from a fixed pool, GPU frame preparation and an OpenGL display."
+authors:
+  - family-names: "Veremeev"
+    given-names: "Dmitry"
+    alias: "BarabashkaD"
+repository-code: "https://github.com/BarabashkaD/multistream-gpu-inference/tree/v2-bundle-pipeline"
+license: "AGPL-3.0-or-later"
+version: "2.0"
+date-released: "2026-11-06"

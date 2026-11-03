@@ -1,0 +1,6 @@
+-r requirements-windows-plan.txt
+glfw==2.11.0
+PyOpenGL==3.1.10
+cuda-bindings==13.4.4
+cuda-pathfinder==1.8.5
+pytest==9.2.0
