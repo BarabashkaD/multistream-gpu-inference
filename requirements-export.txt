@@ -1,0 +1,9 @@
+# Model export in a throwaway Linux container (tools/build_images.ps1, tools/build_images.sh): CPU-only builds of
+# the versions pinned in requirements.txt. The scripts run tools/export_models.py with these.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+ultralytics==8.4.190
+onnx==1.23.2
+numpy==2.5.4
+opencv-python==5.0.0.93

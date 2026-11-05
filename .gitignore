@@ -1,0 +1,12 @@
+.pytest_cache/
+hang.log
+models/
+results/
+*.tar
+# Local data, models, environments and results
+/data/
+.ultralytics/
+.venv/
+*.pt
+*.onnx
+__pycache__/

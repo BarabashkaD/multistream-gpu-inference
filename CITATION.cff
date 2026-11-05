@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "multistream-gpu-inference (v3: external batched inference)"
+abstract: "Multi-process, multi-stream YOLO26n detection and ByteTrack tracking on one NVIDIA GPU, with GPU video decoding, CUDA IPC frame sharing and batched inference."
+authors:
+  - family-names: "Veremeev"
+    given-names: "Dmitry"
+    alias: "BarabashkaD"
+repository-code: "https://github.com/BarabashkaD/multistream-gpu-inference/tree/main"
+license: "AGPL-3.0-or-later"
+version: "3.0"
+date-released: "2026-11-06"

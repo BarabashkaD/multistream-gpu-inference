@@ -1,0 +1,8 @@
+* text=auto
+*.pdf binary
+*.npz binary
+*.onnx binary
+*.mp4 binary
+*.sh text eol=lf
+compose.yaml text eol=lf
+compose.mounts.yaml text eol=lf
