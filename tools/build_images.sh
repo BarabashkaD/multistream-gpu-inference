@@ -7,7 +7,7 @@
 # Needs Docker/buildx, curl and SHA-256 tools. GPU mode also needs the NVIDIA driver and Container Toolkit.
 #   1. checks Docker/buildx (and GPU access unless --cpu-only);
 #   2. downloads and verifies the clip;
-#   3. exports missing ONNX models in a throwaway CPU-only container;
+#   3. exports hash-verified ONNX models in a throwaway CPU-only container;
 #   4. builds both images with the clip as a named build context;
 #   5. always verifies contents, then runs the GPU smoke test unless disabled;
 #   6. optionally writes both images to a tar file for docker load.
@@ -128,13 +128,9 @@ else
 fi
 
 # 3. Models
-missing=()
-for size in "${sizes[@]}"; do
-    [ -s "$v3/models/b$size.onnx" ] || missing+=("$size")
-done
-if [ ${#missing[@]} -eq 0 ]; then
-    say "[3/6] Models: $names present; export skipped"
-else
+# Re-export all requested sizes; stale/nonempty models are not trusted.
+missing=("${sizes[@]}")
+{
     missing_names=""
     for size in "${missing[@]}"; do missing_names="${missing_names:+$missing_names }b$size"; done
     missing_csv="$(IFS=,; printf '%s' "${missing[*]}")"
@@ -154,7 +150,7 @@ else
         [ -s "$v3/models/b$size.onnx" ] || fail "models/b$size.onnx was not written"
     done
     say "[3/6] Models: exported $missing_names"
-fi
+}
 
 # 4. Build
 revision="${VCS_REF:-$(git -C "$v3" rev-parse HEAD 2>/dev/null || printf unknown)}"

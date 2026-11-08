@@ -1,8 +1,9 @@
 # Third-party notices
 
 This project (v3: external batched inference) is licensed under AGPL-3.0-or-later; see LICENSE and NOTICE. It
-depends on the software below, which users install themselves with pip. None of it is redistributed in this
-repository.
+depends on the software below. Local users install dependencies with pip; Docker images redistribute
+installed dependencies, models and video. See `compliance/README.md` for container evidence and outstanding
+release review. The Git tree does not bundle all dependency binaries.
 
 ## Model and tracker
 
@@ -20,7 +21,8 @@ repository.
 
 The NVIDIA libraries below are covered by the additional permission in NOTICE, section 3. Users install them
 from PyPI, directly, as dependencies of PyTorch, or inside the PyTorch, PyNvVideoCodec and Triton wheels, and
-accept their licenses themselves. None of them is redistributed in this repository.
+must follow the applicable terms. Docker images can contain these libraries: installing through pip does
+not by itself establish redistribution permission.
 
 - **CUDA Toolkit libraries** (nvidia-cublas, nvidia-cuda-cupti, nvidia-cuda-nvrtc, nvidia-cuda-runtime,
   nvidia-cufft, nvidia-cufile, nvidia-curand, nvidia-cusolver, nvidia-cusparse, nvidia-nvjitlink,
@@ -29,7 +31,7 @@ accept their licenses themselves. None of them is redistributed in this reposito
   https://docs.nvidia.com/cuda/eula/index.html. It allows installing and using the libraries, and
   redistributing the runtime libraries of its Attachment A inside an application. It also says "You may not
   use the SDK in any manner that would cause it to become subject to an open source software license"
-  (section 1.2, item 5); this project distributes none of them, and NOTICE, section 3 keeps them outside the
+  (section 1.2, item 5); container distribution requires component-specific review, and NOTICE, section 3 keeps them outside the
   AGPL-3.0 terms of the author's code. The libraries are licensed for systems with NVIDIA GPUs, and
   life-critical uses need an agreement with NVIDIA.
 - **cuDNN** (nvidia-cudnn-cu13): License Agreement for NVIDIA Software Development Kits with the cuDNN
@@ -150,3 +152,9 @@ A package resolved to several builds lists each version.
 | ultralytics-platform | 0.1.104 | AGPL-3.0-only | https://github.com/ultralytics/sdk |
 | ultralytics-thop | 2.2.5 | AGPL-3.0 | https://ultralytics.com |
 | urllib3 | 2.8.0 | MIT | https://github.com/urllib3/urllib3/blob/main/CHANGES.rst |
+
+## Container FFmpeg evidence
+
+The inspected PyNvVideoCodec 2.2.3 CP314 Linux wheel includes FFmpeg 9.0.1 source archive and readme.
+The readme says libavcodec is statically embedded in libavformat. See `compliance/README.md` for
+source correspondence, build-information and LGPL review still required before distribution.
