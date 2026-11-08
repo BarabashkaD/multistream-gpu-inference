@@ -235,6 +235,12 @@ measurements behind them are in [docs/performance-and-design.md](docs/performanc
 | v2 | [v2-bundle-pipeline](https://github.com/BarabashkaD/multistream-gpu-inference/tree/v2-bundle-pipeline) | One stream per process as a threaded pipeline of bundles |
 | v3 | `main` (this branch) | One batching inference server for all streams |
 
+## Candidate verification
+
+[GPU verification and deferred release](docs/CANDIDATE_VERIFICATION.md) describes the
+immutable-image smoke test, retained CPU evidence and remaining distribution checks.
+GPU automation is disabled by default; no workflow publishes images.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
