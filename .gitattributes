@@ -6,3 +6,5 @@
 *.sh text eol=lf
 compose.yaml text eol=lf
 compose.mounts.yaml text eol=lf
+# Preserve byte-verified vendored license texts on Windows checkouts.
+compliance/licenses/* text eol=lf

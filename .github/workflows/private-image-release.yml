@@ -1,0 +1,98 @@
+name: Save private CI image release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: private-image-release
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && github.event.repository.private == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      revision: ${{ steps.identity.outputs.revision }}
+      tag: ${{ steps.identity.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Record immutable source identity
+        id: identity
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          echo "revision=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=ci-$(date -u +%Y%m%d)-${SOURCE_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - name: Build and check both images without GPU
+        env:
+          VCS_REF: ${{ github.sha }}
+        run: bash tools/build_images.sh --cpu-only
+      - name: Run mandatory CPU suites
+        run: docker run --rm --network none traffic-v3:server python tools/run_cpu_tests.py
+      - name: Collect evidence and package exact built images
+        env:
+          EXPECTED_REVISION: ${{ github.sha }}
+          CI_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python tools/collect_image_evidence.py
+          python tools/package_image_release.py
+          cd release-assets
+          sha256sum -c SHA256SUMS
+      - name: Transfer checked archive to release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: private-image-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event.repository.private == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: private-image-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets
+      - name: Create and verify private prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ needs.build.outputs.revision }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GH_REPO" --jq .private)" = true
+          cd release-assets
+          sha256sum -c SHA256SUMS
+          test "$(jq -r .source_revision release-manifest.json)" = "$SOURCE_SHA"
+          cp SHA256SUMS ../expected-checksums
+          cat > ../release-notes.md <<EOF
+          Private CI archive of both Docker images for source $SOURCE_SHA.
+          CPU build/tests passed. GPU runtime for these exact images: NOT TESTED.
+          Third-party redistribution review is incomplete. This is archival storage within the existing private repository, not a public distribution clearance.
+          Download all assets and follow RESTORE.md. No GHCR push, stable tag or latest release is created.
+          EOF
+          # Refuse to overwrite a prior tag/release; failed uploads remain drafts.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'Release already exists; inspect it before retrying.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --target "$SOURCE_SHA" --draft --prerelease --latest=false --title "$RELEASE_TAG" --notes-file ../release-notes.md ./*
+          mkdir ../downloaded-release
+          gh release download "$RELEASE_TAG" --dir ../downloaded-release
+          cd ../downloaded-release
+          cmp SHA256SUMS ../expected-checksums
+          sha256sum -c SHA256SUMS
+          test "$(gh api "repos/$GH_REPO" --jq .private)" = true
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease
