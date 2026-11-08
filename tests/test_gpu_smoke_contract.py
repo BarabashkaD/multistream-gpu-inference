@@ -23,6 +23,7 @@ def test_immutable_refs_and_revision_required():
 def test_compose_uses_candidates_without_host_namespace_or_network():
     spec = compose_spec(I, S)
     assert spec['services']['server']['image'] == S
+    assert spec['services']['server']['cap_add'] == ['SYS_PTRACE']
     for name, service in spec['services'].items():
         assert service['network_mode'] == 'none'
         assert service['pull_policy'] == 'never'
@@ -97,3 +98,34 @@ def test_evidence_collector_copies_only_selected_text(monkeypatch, tmp_path):
     assert sum(path.endswith('/manifest.json') for path in copied) == 1
     assert all(path.endswith(('.json', '.md', '.txt', '/LICENSE', '/NOTICE')) for path in copied)
     assert all(call[1] not in ('run', 'push', 'save') for call in calls)
+
+
+def test_standalone_probe_matches_compose_capability(monkeypatch, tmp_path):
+    """Exercise the real probe command without starting Docker or a GPU."""
+    calls = []
+
+    def fake_run(args, **kwargs):
+        """Supply image metadata and stop after capturing the probe command."""
+        calls.append(args)
+        if args[:3] == ['docker', 'image', 'inspect']:
+            return json.dumps([{'Id': 'sha256:' + 'e' * 64, 'Config': {
+                'Labels': {'org.opencontainers.image.revision': R}}}])
+        if args[:2] == ['docker', 'run']:
+            raise RuntimeError('probe captured')
+        return ''
+
+    def fake_cleanup(*args, **kwargs):
+        """Avoid invoking Docker during the harness cleanup."""
+        return None
+
+    monkeypatch.setattr('tools.gpu_smoke.run', fake_run)
+    monkeypatch.setattr('tools.gpu_smoke.subprocess.run', fake_cleanup)
+    with pytest.raises(RuntimeError, match='probe captured'):
+        smoke(I, S, R, tmp_path)
+    probe, = [args for args in calls if args[:2] == ['docker', 'run']]
+    assert probe[-5:] == ['--cap-add', 'SYS_PTRACE', S, 'python', 'tools/run_gpu_tests.py']
+    assert probe.count('--cap-add') == 1
+    assert probe[probe.index('--network') + 1] == 'none'
+    assert probe[probe.index('--gpus') + 1] == 'all'
+    assert '--rm' in probe
+    assert not {'--privileged', '--security-opt', '--pid', '--ipc', '--volume', '-v', '--mount'} & set(probe)

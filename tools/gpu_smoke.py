@@ -80,9 +80,10 @@ def smoke(instance, server, revision, output):
             if (info["Config"]["Labels"] or {}).get("org.opencontainers.image.revision") != revision:
                 raise ValueError(f"{target}: source revision mismatch")
             report["image_ids"][target] = info["Id"]
+        # Match the Compose server: CUDA IPC may need ptrace-authorized pidfd access.
         # No bind-mounted application code: tests and models come from the candidate.
         probe = run(["docker", "run", "--rm", "--name", probe_name, "--network", "none", "--gpus", "all",
-                     server, "python", "tools/run_gpu_tests.py"], timeout=1200)
+                     "--cap-add", "SYS_PTRACE", server, "python", "tools/run_gpu_tests.py"], timeout=1200)
         (output / "gpu-tests.log").write_text(probe + "\n")
         with tempfile.TemporaryDirectory(prefix="mgi-smoke-") as folder:
             spec = Path(folder) / "compose.json"
