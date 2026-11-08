@@ -13,3 +13,5 @@ data/
 docs/
 .ultralytics/
 *.pt
+
+!models/manifest.json

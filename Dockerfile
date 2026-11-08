@@ -35,7 +35,8 @@ LABEL org.opencontainers.image.source="https://github.com/BarabashkaD/multistrea
     org.opencontainers.image.licenses="AGPL-3.0-or-later"
 # This label describes the project; third-party components retain their own licenses.
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
-COPY tools/check_image.py /app/tools/check_image.py
+COPY tools/check_image.py tools/image_inventory.py /app/tools/
+COPY compliance/ /app/compliance/
 # Preserve the host-layout default used by tests and command-line configurations.
 RUN ln -s /data /app/data
 
@@ -45,6 +46,7 @@ COPY --from=build-instance /opt/venv /opt/venv
 COPY pipeline/ pipeline/
 COPY run_instance.py monitor.py ./
 COPY --from=clip pexels-36304379.mp4 /data/pexels-36304379.mp4
+RUN python tools/image_inventory.py
 # The image description. Keep it in step with the server target's label.
 LABEL org.opencontainers.image.description="Multi-stream YOLO26n detection and ByteTrack tracking on one NVIDIA GPU. Source, build instructions and license: https://github.com/BarabashkaD/multistream-gpu-inference"
 
@@ -59,5 +61,6 @@ COPY compose.yaml compose.mounts.yaml ./
 COPY run_server.py run_instance.py run_fleet.py bench.py monitor.py pytest.ini ./
 COPY models/ models/
 COPY --from=clip pexels-36304379.mp4 /data/pexels-36304379.mp4
+RUN python tools/image_inventory.py
 # The image description. Keep it in step with the instance target's label.
 LABEL org.opencontainers.image.description="Multi-stream YOLO26n detection and ByteTrack tracking on one NVIDIA GPU. Source, build instructions and license: https://github.com/BarabashkaD/multistream-gpu-inference"

@@ -26,6 +26,29 @@ def check(root, data, target, sizes, expected_documents):
     if digest(data / "pexels-36304379.mp4") != CLIP_SHA256:
         raise ValueError("Video SHA-256 mismatch")
     if target == "server":
+        manifest = json.loads((root / "models/manifest.json").read_text())
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from tools.export_models import WEIGHTS_SHA256, WEIGHTS_URL
+        if (manifest.get("schema") != 1 or manifest.get("weights", {}).get("sha256") != WEIGHTS_SHA256
+                or manifest.get("weights", {}).get("url") != WEIGHTS_URL):
+            raise ValueError("Invalid pinned weights provenance")
+        expected_export = {"width": 640, "height": 384, "opset": 12,
+                           "dynamic": False, "simplify": False, "nms": False, "device": "cpu"}
+        packages = manifest.get("packages")
+        if (manifest.get("export") != expected_export or not isinstance(packages, dict)
+                or any(not isinstance(packages.get(name), str) or not packages[name]
+                       for name in ("ultralytics", "onnx", "torch"))):
+            raise ValueError("Invalid export provenance")
+        if set(manifest["models"]) != {f"b{size}.onnx" for size in sizes}:
+            raise ValueError("Unexpected model manifest set")
+        if {p.name for p in (root / "models").glob("b*.onnx")} != set(manifest["models"]):
+            raise ValueError("Unrecorded or missing model files")
+        for size in sizes:
+            name = f"b{size}.onnx"
+            entry = manifest["models"][name]
+            if entry["sha256"] != digest(root / "models" / name) or entry["shape"] != [size, 300, 6]:
+                raise ValueError(f"Model manifest mismatch: {name}")
         for size in sizes:
             model = root / "models" / f"b{size}.onnx"
             if not model.is_file() or model.stat().st_size == 0:
