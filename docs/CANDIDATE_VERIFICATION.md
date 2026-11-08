@@ -41,7 +41,18 @@ tests, then processes the fixed sample clip with two separate instance container
 and one server. It requires 611 tracked frames per stream, real detections, all
 buffers returned, 1222 server inferences and no dead streams. Skipped tests fail.
 Containers have no network; instances share only the server PID namespace and a
-job-specific IPC volume. Server SYS_PTRACE matches the existing CUDA IPC design.
+job-specific IPC volume. Both the standalone GPU-test probe and Compose server
+receive `SYS_PTRACE`, matching the existing CUDA IPC design. In the verified
+WSL/Docker environment, omitting it caused `pidfd_getfd` to return `EPERM` and
+CUDA IPC handle opening to fail, while adding only this capability passed.
+This is a runtime-permissions difference, not evidence of a different build.
+
+**Security tradeoff:** `SYS_PTRACE` broadens process inspection/access within the
+applicable namespaces and can affect Docker's default seccomp permissions. Run
+only trusted, explicitly authorized images on the approved disposable host.
+The harness does not use privileged mode, disable seccomp, or share host PID/IPC
+namespaces. Do not replace this narrow capability with those broader overrides.
+The capability is not added to instance containers.
 The script removes its own containers/volume. It writes a digest-bound JSON report
 and logs, including a failed report when Docker/GPU is unavailable.
 
