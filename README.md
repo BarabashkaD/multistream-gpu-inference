@@ -239,7 +239,10 @@ measurements behind them are in [docs/performance-and-design.md](docs/performanc
 
 [GPU verification and deferred release](docs/CANDIDATE_VERIFICATION.md) describes the
 immutable-image smoke test, retained CPU evidence and remaining distribution checks.
-GPU automation is disabled by default; no workflow publishes images.
+GPU automation is disabled by default; PR CI does not publish images.
+The manual [GHCR release workflow](docs/ghcr-release.md) builds and publishes both
+checked images and adds their digest links to a GitHub prerelease. First-time
+GHCR packages default to private; public visibility is a one-time package setting.
 
 ## Contributing
 

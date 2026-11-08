@@ -1,134 +1,69 @@
 # GHCR images and repository releases
 
-This replaces the closed, unmerged archive proposal in PR #6.
-Existing Container CI still does not push images. This new manual workflow is
-**disabled** by `compliance/ghcr-release-policy.json`. Merging it alone publishes
-nothing. The merged PR #7 corrected the GPU harness, not registry publication.
+One manual workflow, **Publish checked images to GHCR and release**, handles both
+images and a GitHub prerelease. There is no activation policy, marker bootstrap,
+new PAT, or follow-up configuration PR. Merging this change publishes nothing.
 
-## Destinations and behavior
+## Run after merging
 
-- `ghcr.io/barabashkad/multistream-gpu-inference-instance`
-- `ghcr.io/barabashkad/multistream-gpu-inference-server`
+1. Review redistribution obligations for the actual bundled components below.
+   **Dispatch uploads real binaries, including a temporary Actions artifact
+   visible to this public repository's readers.** A private GHCR package does
+   not make this operation private.
+2. In Actions, select **Publish checked images to GHCR and release**, choose
+   **Run workflow** on `main`. The exact dispatched main commit is built; a stale
+   dispatch is rejected before building. Standard `GITHUB_TOKEN` is sufficient.
+3. CI builds and checks both targets, runs mandatory CPU suites, pushes them to:
+   - `ghcr.io/barabashkad/multistream-gpu-inference-instance`
+   - `ghcr.io/barabashkad/multistream-gpu-inference-server`
+4. Open the resulting GitHub prerelease. It contains immutable `docker pull
+   ...@sha256:...` commands, package links, source revision, and license/inventory
+   evidence. Docker archives are not attached to the release.
+5. **First push creates private GHCR packages by default**, even for this public
+   repository. For anonymous pulls, open each package link → Package settings →
+   Change visibility → Public. This is a one-time owner setting, not another PR,
+   workflow or rebuild. GitHub warns that public packages cannot be made private
+   again. Inspect existing package permissions before changing visibility.
+   The release records visibility at creation time, not a live status.
 
-Existing packages must be linked to this repository and match the explicit
-policy visibility (`private` or `public`), as must the repository itself.
-The default remains disabled and private. Missing packages can be initialized
-only with the separately approved bootstrap option described below. HTTP 403,
-other errors, or accessible packages with mismatched visibility/link stop the run.
-A 404 is ambiguous, not proof that a name is unused.
-Review package collaborators, inherited repository access, and Actions access
-before enabling. The API visibility/link check cannot enumerate all recipients.
+Subsequent runs use the same packages and their existing visibility. Repository
+visibility and package visibility are independent. If a pre-existing package
+rejects the push, its owner must grant this repository Actions access in Package
+settings; do not create a new personal token as a workaround.
 
-A maintainer must separately review the intended audience and exact
-source's distribution obligations, record the approval/review references and
-40-character source commit in the policy, and change `enabled` via reviewed PR.
-That commit must be an ancestor of the dispatch's main commit. Do not use the
-policy-edit commit's own SHA (self-reference); authorize an existing source commit.
-The source checkout is detached and exact. It must contain the build, tests and
-evidence tooling. Workflows only run on manual main dispatch. Public mode additionally requires a
-nonempty `public_distribution_review` reference; private review is not reusable
-as public clearance. The workflow checks live repository and package visibility
-before upload and repository visibility again before release promotion.
-No secrets, new PAT, package permission changes or security settings are added.
+## What CI verifies
 
-Read-only build runner builds both images, verifies contents, runs mandatory CPU
-suites in server, extracts evidence and transfers the exact Docker image archive
-through a one-day Actions artifact (readable by the repository audience). A fresh publishing runner has only
-`contents:read` and `packages:write`; it loads but does not execute containers or
-repository scripts. It checks image IDs/revisions, pushes unique run-attempt tags,
-resolves registry digests, pulls by digest and compares config IDs. A separate
-`contents:write` runner creates the source-bound GitHub prerelease only after both
-images succeed, attaches evidence and verifies downloaded assets. No archives are
-attached to releases, and no `latest` or stable tag is assigned. Releases have the
-repository's current audience; they are not a registry themselves.
+A read-only runner executes source/build/test tools and saves both checked images.
+A fresh packages-write runner loads, but does not execute, the images. It checks
+image IDs and revision labels, pushes unique `ci-<sha12>-<run>-<attempt>` tags,
+pulls by registry digest and verifies config identity and repository association.
+A separate contents-write runner creates the source-bound tag and draft release,
+verifies downloaded assets, and publishes the prerelease only after both targets
+succeed. No `latest` or stable tag is assigned. Consumers should use digests.
 
-If a push partly succeeds, the completed package version remains; there is no
-cross-package transaction. The release job atomically creates a lightweight source tag first. A failed release
-creation may leave that tag; a failed upload may leave a draft. Inspect these
-states manually. Retrying produces a new run-attempt tag and never declares the
-partial attempt a complete release. Do not automatically delete existing versions.
-Storage quotas can block the large intermediate artifact; no hidden fallback
-publication or rebuild is performed. Tag names are mutable at the registry:
-consumers should use the immutable digest references in the release.
+A failed run can leave one pushed image, a source tag, or a draft release.
+There is no cross-package rollback. Rerunning creates a new attempt-specific tag;
+inspect partial state rather than deleting versions automatically. Image transfer
+uses a one-day Actions artifact; storage quotas can block the run. No fallback
+upload is attempted. Main protection and read-only PR CI are unchanged.
 
 ## License and GPU boundaries
 
-The project is AGPL-3.0-or-later with NOTICE terms. Bundled libraries, weights,
-media and binary components retain their own terms; the OCI project-license label
-is not a blanket license for them. Inventory/notices do not by themselves resolve
-Ultralytics/NVIDIA compatibility, component redistribution permissions or complete
-matching source/relink obligations (including bundled FFmpeg). Resolve the specific
-scope before authorizing it. Private publication also shares with authorized
-package recipients, so it is not automatically exempt from review.
+The project is AGPL-3.0-or-later with NOTICE terms. Dependencies, model weights,
+media and binary components retain their own licenses. Inventory and attached
+notices do **not** certify complete redistribution clearance. Review the concrete
+Ultralytics/AGPL and NVIDIA terms and the matching-source/relink obligations for
+bundled FFmpeg before distributing these images. The project's linking exception
+cannot grant rights over other contributors' code. This workflow does not replace
+that assessment with approval-shaped strings in JSON.
 
-The images are Linux/amd64, CPU-exported ONNX batches 1/8/16. These release bytes
-are **not GPU qualified** by this workflow. The successful prior local WSL test
-is not a test of the registry digest. The merged PR #7 corrects the GPU harness; perform explicit digest-bound verification.
+Images are Linux/amd64 with CPU-exported ONNX batches 1/8/16. The published digests
+are **not GPU qualified** by CPU CI. Prior local GPU success is not validation of
+these registry bytes; use the existing digest-bound GPU smoke harness separately.
 
-## Using the result
+Private pulls require GHCR authentication with read:packages; public pulls do not.
+Do not commit tokens or put them on a command line; use password-stdin.
 
-Open the GitHub release for `docker pull ghcr.io/...@sha256:...` for both targets
-and links to their package pages. Private pulls require appropriate GHCR login;
-GitHub documents a classic PAT with `read:packages` for local users. Supply tokens
-through password-stdin, never commit them. Actions publication uses GITHUB_TOKEN,
-not a new personal credential. Package creation defaults to private, but an
-existing package can have independent visibility/access: never infer it from the
-source repository alone.
-
-References (checked 2026-11-08):
+References:
 - https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 - https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility
-
-## Moving to public distribution
-
-1. Review the exact source, repository history, Actions artifacts/logs and bundled
-   component obligations before making anything public. Changing repository
-   visibility does not change existing package visibility.
-2. Provision missing packages through the explicit bootstrap below, or use
-   existing packages linked to this repository with Actions access. Separately
-   authorize and set public visibility for both packages. This workflow does not
-   change package visibility; GitHub warns that public packages cannot be made
-   private again.
-3. In a reviewed policy PR set `visibility: "public"`, an existing source SHA,
-   approval/audience/distribution references, and `public_distribution_review`
-   documenting public redistribution clearance. Set `enabled: true` only after
-   those reviews. These strings are audit references, not automatic legal checks.
-4. Dispatch from main and inspect the resulting prerelease and both digest links.
-   Public package pulls need no login. No publication occurs from this preparation
-   PR alone. GPU qualification is still a separate step.
-
-Visibility can be changed concurrently by administrators; API checks reduce
-accidental audience mismatch but cannot lock those settings transactionally.
-
-## First-package bootstrap
-
-Package creation is supported with the existing `GITHUB_TOKEN`, not a new PAT.
-Normal dispatch still fails closed on missing/inaccessible packages.
-For an approved first publication:
-- Record authorization for creating the two named packages and marker tags in
-  `bootstrap_review`, set `bootstrap_enabled: true` in the reviewed policy,
-  and dispatch with `bootstrap_packages: true`. The normal enabled/exact-source/
-  distribution/audience gates still apply; public mode also needs its public review.
-- On HTTP 404 only, CI imports and pushes an empty filesystem marker with the
-  repository source label. No project files, model weights, or dependency bytes
-  are in this marker; it is not an executable application image. Thus a hidden
-  pre-existing package does not receive project bytes based on an ambiguous 404.
-- GHCR creates new packages private by default and links Actions-created packages
-  to the workflow repository. CI verifies both properties after each marker push.
-  If a collision or unexpected access/visibility/link is detected, it stops.
-- After both namespaces exist, CI checks the intended audience again before
-  uploading either real image. In public mode newly created private packages
-  deliberately stop the run with an actionable error, without a release.
-- The owner must separately approve and change both package visibilities in
-  GitHub package settings. This is irreversible; it is not performed by this
-  workflow. Then rerun without the bootstrap checkbox. Only verified public
-  packages receive a public release, and package visibility/link are checked
-  again immediately before draft promotion.
-- Successful private-mode bootstrap can continue to checked-image publication
-  and a private release in the same run.
-
-Marker tags are `bootstrap-ci-<source>-<run>-<attempt>`. They remain for inspection;
-no package versions are deleted automatically. A failed run may leave one marker
-or both private packages. Inspect the actual state rather than assuming rollback.
-Existing package Actions-access failures still require an authorized owner setting
-change. Empty markers do not replace the image inventory or redistribution review.

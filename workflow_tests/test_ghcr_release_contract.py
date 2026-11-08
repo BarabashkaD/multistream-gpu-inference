@@ -1,172 +1,172 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Dmitry Veremeev
 # Additional terms under AGPL-3.0 section 7 apply: see NOTICE.
-"""Guard the disabled, manual GHCR release's trust boundaries without Docker."""
+"""Exercise release transport failures without credentials, Docker or network."""
+import hashlib
 import json
 import os
-import tempfile
+from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import unittest
-from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / '.github/workflows/ghcr-release.yml').read_text()
+SHA = 'a' * 40
+REPO = 'BarabashkaD/multistream-gpu-inference'
+
+
+def script_after(marker):
+    """Extract a workflow's literal bash block without a YAML dependency."""
+    tail = WORKFLOW.split(marker, 1)[1].split('        run: |\n', 1)[1]
+    lines = []
+    for line in tail.splitlines():
+        if line and not line.startswith('          '):
+            break
+        lines.append(line[10:])
+    return '\n'.join(lines)
 
 
 class ReleaseContract(unittest.TestCase):
-    """Static workflow safety checks; run on the source checkout, not in images."""
-    def test_publication_policy_defaults_closed(self):
-        """A merged default policy must not authorize publication."""
-        policy = json.loads((ROOT / 'compliance/ghcr-release-policy.json').read_text())
-        assert policy['enabled'] is False
-        assert policy['visibility'] == 'private'
-        assert not policy['source_revision']
-        assert not policy['authorization_record']
-        assert not policy['distribution_review']
-        assert not policy['audience_review']
-        assert not policy['public_distribution_review']
-        assert policy['bootstrap_enabled'] is False
-        assert not policy['bootstrap_review']
+    """Check runnable transport and least-privilege workflow structure."""
 
+    def test_manual_exact_main_only(self):
+        """Merges and PRs never publish; dispatch pins the checked source."""
+        self.assertIn('workflow_dispatch:', WORKFLOW)
+        self.assertNotIn('pull_request:', WORKFLOW)
+        self.assertNotIn('\n  push:', WORKFLOW)
+        self.assertIn("if: github.ref == 'refs/heads/main'", WORKFLOW)
+        self.assertIn('git rev-parse HEAD', WORKFLOW)
+        self.assertIn('git/ref/heads/main', WORKFLOW)
+        self.assertNotIn('ghcr-release-policy', WORKFLOW)
+        self.assertNotIn('bootstrap', WORKFLOW)
+        self.assertIn('cancel-in-progress: false', WORKFLOW)
 
-    def test_privileged_jobs_do_not_execute_repository_or_images(self):
-        """Fresh privileged runners only transport validated image data."""
-        privileged = WORKFLOW.split('  publish:', 1)[1]
-        assert 'actions/checkout@' not in privileged
-        assert 'docker run' not in privileged
-        assert 'docker build' not in privileged
-        assert 'bash tools/' not in privileged
-        assert 'packages: write' in privileged
-        assert 'contents: write' in privileged
-        assert 'needs: [build, publish]' in privileged
-        assert 'docker pull "$digest"' in privileged
-        assert 'test "$(docker inspect --format' in privileged
+    def test_privileged_jobs_only_transport(self):
+        """Untrusted builds/tests run without package or content-write grants."""
+        build, privileged = WORKFLOW.split('  publish:', 1)
+        self.assertNotIn('packages: write', build)
+        self.assertNotIn('contents: write', build)
+        for forbidden in ('actions/checkout@', 'docker run ', 'docker build ', 'bash tools/'):
+            self.assertNotIn(forbidden, privileged)
+        self.assertIn('packages: write', privileged)
+        self.assertIn('contents: write', privileged)
+        self.assertIn('needs: [build, publish]', privileged)
+        self.assertIn('persist-credentials: false', build)
+        self.assertIn('tools/run_cpu_tests.py', build)
+        self.assertIn('tools/collect_image_evidence.py', build)
 
+    def test_release_is_source_bound_and_not_gpu_qualified(self):
+        """Verify tag/assets before promotion; provide digest pulls, not archives."""
+        self.assertIn('docker pull "$digest"', WORKFLOW)
+        self.assertIn('sha256sum -c SHA256SUMS', WORKFLOW)
+        self.assertIn('--verify-tag', WORKFLOW)
+        self.assertIn('-f "sha=$SOURCE_SHA"', WORKFLOW)
+        self.assertIn('.object.type == "commit" and .object.sha == $sha', WORKFLOW)
+        self.assertLess(WORKFLOW.index('git/ref/tags/$RELEASE_TAG'), WORKFLOW.index('gh release edit'))
+        self.assertIn('--latest=false', WORKFLOW)
+        self.assertNotIn(':latest', WORKFLOW)
+        self.assertIn('GPU runtime for these exact published images: NOT TESTED', WORKFLOW)
+        self.assertIn('instance=$instance_visibility; server=$server_visibility', WORKFLOW)
+        create = next(line for line in WORKFLOW.splitlines() if 'gh release create' in line)
+        self.assertNotIn('images.tar', create)
 
-    def test_source_and_publication_are_fail_closed(self):
-        """Require manual exact-source approval, matching package audience and no latest."""
-        assert 'workflow_dispatch:' in WORKFLOW
-        assert 'pull_request:' not in WORKFLOW
-        assert 'git merge-base --is-ancestor "$revision" HEAD' in WORKFLOW
-        assert 'git checkout --detach "$revision"' in WORKFLOW
-        assert '.enabled == true' in WORKFLOW
-        assert '.visibility == $visibility and .repository.full_name == $repo' in WORKFLOW
-        assert '--latest=false' in WORKFLOW
-        assert ':latest' not in WORKFLOW
-        assert 'sha256sum -c SHA256SUMS' in WORKFLOW
+    def test_all_literal_scripts_parse(self):
+        """Catch shell syntax errors even without running Docker operations."""
+        for block in WORKFLOW.split('        run: |\n')[1:]:
+            lines = []
+            for line in block.splitlines():
+                if line and not line.startswith('          '):
+                    break
+                lines.append(line[10:])
+            result = subprocess.run(['bash', '-n'], input='\n'.join(lines),
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
-
-    def test_release_tag_is_verified_before_draft_promotion(self):
-        """An existing tag must never redirect a source-bound release."""
-        assert 'git/matching-refs/tags/$RELEASE_TAG' in WORKFLOW
-        assert WORKFLOW.index('gh api --method POST') < WORKFLOW.index('gh release create')
-        assert '--verify-tag' in WORKFLOW
-        assert '-f "sha=$SOURCE_SHA"' in WORKFLOW
-        assert '.object.type == "commit" and .object.sha == $sha' in WORKFLOW
-        assert WORKFLOW.index('git/ref/tags/$RELEASE_TAG') < WORKFLOW.index('gh release edit')
-
-    def test_public_requires_explicit_distribution_review(self):
-        """Public mode must require extra review and propagate exact audience."""
-        assert '.visibility == "private" or .visibility == "public"' in WORKFLOW
-        assert 'if .visibility == "public" then (.public_distribution_review' in WORKFLOW
-        assert 'visibility: ${{ steps.policy.outputs.visibility }}' in WORKFLOW
-        assert WORKFLOW.count('EXPECTED_VISIBILITY: ${{ needs.build.outputs.visibility }}') == 2
-        assert WORKFLOW.count('--jq .visibility)" = "$EXPECTED_VISIBILITY"') == 3
-        assert WORKFLOW.count('.visibility == $visibility and .repository.full_name == $repo') == 3
-        assert 'github.event.repository.private == true' not in WORKFLOW
-        assert '--method PATCH' not in WORKFLOW
-
-    @unittest.skipUnless(shutil.which("jq"), "jq is required for policy execution")
-    def test_actual_policy_predicate(self):
-        """Execute the workflow predicate for approved and denied audiences."""
-        predicate = WORKFLOW.split("jq -e '", 1)[1].split("' \"$policy\"", 1)[0]
-        private = dict(schema=1, enabled=True, visibility="private",
-                       authorization_record="approval", distribution_review="review",
-                       audience_review="audience")
-        cases = [
-            (private, True),
-            (dict(private, visibility="public"), False),
-            (dict(private, visibility="public", public_distribution_review=""), False),
-            (dict(private, visibility="public", public_distribution_review="review"), True),
-            (dict(private, visibility="internal"), False),
-            (dict(private, enabled=False), False),
-            (dict(private, authorization_record=""), False),
-        ]
-        for policy, allowed in cases:
-            with self.subTest(policy=policy):
-                result = subprocess.run(["jq", "-e", predicate],
-                                        input=json.dumps(policy), text=True,
-                                        capture_output=True, check=False)
+    def test_actual_source_selection(self):
+        """Reject dispatch/repository/source mismatches before a build."""
+        script = script_after('      - name: Select exact dispatched main source')
+        mocks = 'git() { echo "$CHECKOUT"; }; gh() { echo "$MAIN"; };\n'
+        for checkout, main, repo, allowed in (
+                (SHA, SHA, REPO, True), ('bad', SHA, REPO, False),
+                (SHA, 'bad', REPO, False), (SHA, SHA, 'other/repo', False)):
+            with self.subTest(checkout=checkout, main=main, repo=repo), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / 'output'
+                env = dict(os.environ, CHECKOUT=checkout, MAIN=main, GH_REPO=repo,
+                           GITHUB_SHA=SHA, GITHUB_OUTPUT=str(output), GITHUB_RUN_ID='1',
+                           GITHUB_RUN_ATTEMPT='2')
+                result = subprocess.run(['bash', '-c', mocks + script], env=env,
+                                        capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                if allowed:
+                    self.assertIn(f'revision={SHA}', output.read_text())
+                    self.assertIn(f'tag=ci-{SHA[:12]}-1-2', output.read_text())
 
-    @unittest.skipUnless(shutil.which("jq"), "jq is required for bootstrap checks")
-    def test_bootstrap_transport_boundary(self):
-        """Run the actual preflight shell with mocked network/container commands."""
-        start = WORKFLOW.index('          echo "$GH_TOKEN" | docker login')
-        end = WORKFLOW.index('          cd transfer', start)
-        script = "\n".join(line[10:] for line in WORKFLOW[start:end].splitlines())
+    @unittest.skipUnless(shutil.which('jq'), 'jq required for shell checks')
+    def test_actual_publish_script(self):
+        """First push needs no existing namespace; failures prevent completion."""
+        script = script_after('      - name: Load checked images, push and verify registry digests')
         mocks = r'''
-set -euo pipefail
 docker() {
   printf '%s\n' "$*" >> "$TRACE"
-  if [[ "$1" = import ]]; then cat >/dev/null; fi
+  case "$1" in
+    login) cat >/dev/null;;
+    push) [[ "$CASE" != push_failure ]];;
+    inspect)
+      case "$3" in
+        *RepoDigests*)
+          if [[ "$CASE" = bad_digest ]]; then echo invalid; else printf '%s@sha256:%064d\n' "${4%:*}" 1; fi;;
+        *revision*) if [[ "$CASE" = wrong_revision ]]; then echo wrong; else echo "$SOURCE_SHA"; fi;;
+        *) if [[ "$4" = *@* && "$CASE" = wrong_image ]]; then echo wrong; else echo sha256:checked; fi;;
+      esac;;
+  esac
 }
-curl() {
-  local output=""
-  while (($#)); do
-    if [[ "$1" = --output ]]; then output="$2"; shift; fi
-    shift
-  done
-  printf '{"visibility":"%s","repository":{"full_name":"%s"}}' "$BEFORE" "$LINK" > "$output"
-  if [[ "$STATUS" = mixed ]]; then
-    if [[ "$output" = *server* ]]; then printf 404; else printf 200; fi
-  else
-    printf '%s' "$STATUS"
-  fi
+gh() {
+  printf 'api %s\n' "$*" >> "$TRACE"
+  [[ "$CASE" != api_failure ]] || return 1
+  repo="$GH_REPO"; visibility=private
+  [[ "$CASE" != wrong_repo ]] || repo=another/repo
+  [[ "$CASE" != public ]] || visibility=public
+  [[ "$CASE" != bad_visibility ]] || visibility=internal
+  printf '{"repository":{"full_name":"%s"},"visibility":"%s"}\n' "$repo" "$visibility"
 }
-gh() { printf '{"visibility":"%s","repository":{"full_name":"%s"}}' "$AFTER" "$LINK"; }
 '''
-        cases = [
-            # status, opt-in, intended, before, after, link, allowed, marker pushes
-            ("404", "false", "private", "private", "private", True, False, 0),
-            ("403", "true", "private", "private", "private", True, False, 0),
-            ("500", "true", "private", "private", "private", True, False, 0),
-            ("404", "true", "private", "private", "private", True, True, 2),
-            ("404", "true", "public", "private", "private", True, False, 2),
-            ("404", "true", "public", "public", "public", True, False, 1),
-            ("404", "true", "private", "private", "private", False, False, 1),
-            ("mixed", "true", "public", "private", "private", True, False, 1),
-            ("200", "true", "public", "private", "private", True, False, 0),
-            ("200", "false", "public", "public", "public", True, True, 0),
-            ("200", "false", "public", "private", "private", True, False, 0),
-            ("200", "false", "private", "private", "private", False, False, 0),
-        ]
-        for status, optin, intended, before, after, linked, allowed, pushes in cases:
-            with self.subTest(status=status, optin=optin, intended=intended,
-                              before=before, after=after, linked=linked):
-                with tempfile.TemporaryDirectory() as directory:
-                    trace = Path(directory) / "trace"
-                    env = dict(os.environ, STATUS=status, BOOTSTRAP_REQUESTED=optin,
-                               EXPECTED_VISIBILITY=intended, BEFORE=before, AFTER=after,
-                               LINK="BarabashkaD/multistream-gpu-inference" if linked else "other/repo",
-                               GH_REPO="BarabashkaD/multistream-gpu-inference", GH_TOKEN="test",
-                               GITHUB_ACTOR="test", RELEASE_TAG="test", TRACE=str(trace))
-                    result = subprocess.run(["bash", "-c", mocks + script], env=env,
-                                            cwd=directory, text=True, capture_output=True)
-                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
-                    lines = trace.read_text().splitlines()
-                    pushed = [line for line in lines if line.startswith("push ")]
-                    self.assertEqual(len(pushed), pushes)
-                    self.assertTrue(all(":bootstrap-test" in line for line in pushed))
+        cases = ('first_push', 'public', 'push_failure', 'bad_digest', 'wrong_revision',
+                 'wrong_image', 'api_failure', 'wrong_repo', 'bad_visibility', 'bad_archive')
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                transfer = root / 'transfer'
+                evidence = transfer / 'image-evidence'
+                evidence.mkdir(parents=True)
+                (evidence / 'images.json').write_text(json.dumps(dict(
+                    revision=SHA, images={target: dict(id='sha256:checked') for target in ('instance', 'server')})))
+                (transfer / 'images.tar').write_bytes(b'test archive')
+                checksum = hashlib.sha256(b'test archive').hexdigest()
+                if case == 'bad_archive':
+                    checksum = '0' * 64
+                (transfer / 'SHA256SUMS').write_text(f'{checksum}  images.tar\n')
+                trace = root / 'trace'
+                env = dict(os.environ, CASE=case, TRACE=str(trace), GH_REPO=REPO,
+                           GH_TOKEN='test', GITHUB_ACTOR='test', SOURCE_SHA=SHA, RELEASE_TAG='ci-test')
+                result = subprocess.run(['bash', '-c', 'set -euo pipefail\n' + mocks + script],
+                                        cwd=root, env=env, capture_output=True, text=True)
+                allowed = case in ('first_push', 'public')
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                self.assertEqual((root / 'release-assets/SHA256SUMS').exists(), allowed)
+                lines = trace.read_text().splitlines()
+                self.assertIn('logout ghcr.io', lines)
+                if allowed:
+                    self.assertEqual(sum(line.startswith('push ') for line in lines), 2)
+                    self.assertLess(next(i for i, line in enumerate(lines) if line.startswith('push ')),
+                                    next(i for i, line in enumerate(lines) if line.startswith('api ')))
+                    for target in ('instance', 'server'):
+                        self.assertRegex((root / f'release-assets/{target}.ref').read_text(),
+                                         rf'^ghcr.io/barabashkad/multistream-gpu-inference-{target}@sha256:[0-9a-f]{{64}}\n$')
+                if case in ('wrong_revision', 'bad_archive'):
+                    self.assertFalse(any(line.startswith('push ') for line in lines))
 
-    def test_bootstrap_and_release_visibility_gates(self):
-        """Bootstrap must be explicit and public promotion must recheck packages."""
-        assert 'default: false' in WORKFLOW
-        assert '.bootstrap_enabled == true and (.bootstrap_review' in WORKFLOW
-        assert 'BOOTSTRAP_REQUESTED: ${{ needs.build.outputs.bootstrap }}' in WORKFLOW
-        assert 'packages: read' in WORKFLOW.split('  release:', 1)[1]
-        release = WORKFLOW.split('  release:', 1)[1]
-        assert release.index('packages/container/multistream-gpu-inference-$target') < release.index('gh release edit')
-        assert 'docker import' in WORKFLOW
-        assert WORKFLOW.index('Both namespaces now exist') < WORKFLOW.index('docker load -i images.tar')
+
+if __name__ == '__main__':
+    unittest.main()
