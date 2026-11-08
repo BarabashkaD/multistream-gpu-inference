@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Dmitry Veremeev
+# Additional terms under AGPL-3.0 section 7 apply: see NOTICE.
+name: Bootstrap empty private GHCR packages
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_empty_markers:
+        description: Create only empty private package markers; no application images or release
+        type: boolean
+        default: false
+permissions:
+  contents: read
+# Share the lock with the release workflow.
+concurrency:
+  group: ghcr-release
+  cancel-in-progress: false
+jobs:
+  authorize:
+    if: github.ref == 'refs/heads/main' && inputs.confirm_empty_markers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      approved: ${{ steps.policy.outputs.approved }}
+    steps:
+      - name: Read bootstrap authorization from this exact main revision
+        id: policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GH_REPO" = BarabashkaD/multistream-gpu-inference
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(gh api "repos/$GH_REPO/commits/main" --jq .sha)" = "$GITHUB_SHA"
+          # Read only JSON through the API. Never check out or run project code.
+          gh api "repos/$GH_REPO/contents/compliance/ghcr-release-policy.json?ref=$GITHUB_SHA" \
+            --jq .content | base64 --decode > policy.json
+          jq -e '.schema == 1 and .bootstrap_enabled == true and
+            (.bootstrap_review | type == "string" and test("\\S"))' policy.json
+          echo "approved=true" >> "$GITHUB_OUTPUT"
+  bootstrap:
+    needs: authorize
+    if: needs.authorize.outputs.approved == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Create or verify the two empty private namespaces
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GH_REPO" = BarabashkaD/multistream-gpu-inference
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          test "$(gh api "repos/$GH_REPO/commits/main" --jq .sha)" = "$GITHUB_SHA"
+          # No checkout, build, application image, artifact transfer, or release.
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          for target in instance server; do
+            test "$(gh api "repos/$GH_REPO/commits/main" --jq .sha)" = "$GITHUB_SHA"
+            endpoint="users/BarabashkaD/packages/container/multistream-gpu-inference-$target"
+            status=$(curl --silent --show-error --output "package-$target.json" --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/$endpoint")
+            if [[ "$status" = 404 ]]; then
+              # 404 can conceal an existing package: send only an empty filesystem.
+              marker="ghcr.io/barabashkad/multistream-gpu-inference-$target:bootstrap-empty-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+              tar -cf - --files-from /dev/null | docker import \
+                --change "LABEL org.opencontainers.image.source=https://github.com/$GH_REPO" - "$marker"
+              docker push "$marker"
+              gh api "$endpoint" > "package-$target.json"
+            else
+              test "$status" = 200
+            fi
+            jq -e --arg repo "$GH_REPO" \
+              '.visibility == "private" and .repository.full_name == $repo' "package-$target.json"
+          done
+          # Recheck both after a partial retry, too. Never change access or visibility.
+          for target in instance server; do
+            gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" | \
+              jq -e --arg repo "$GH_REPO" '.visibility == "private" and .repository.full_name == $repo'
+          done
+          echo "Both private GHCR packages are linked to $GH_REPO. No application image or release was published." >> "$GITHUB_STEP_SUMMARY"
