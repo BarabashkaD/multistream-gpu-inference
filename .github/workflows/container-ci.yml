@@ -1,0 +1,42 @@
+name: Container CI (no publication)
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: container-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cpu-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build both targets and check CPU contents
+        env:
+          VCS_REF: ${{ github.sha }}
+        run: bash tools/build_images.sh --cpu-only
+      - name: Mandatory CPU test suites
+        run: docker run --rm --network none traffic-v3:server python tools/run_cpu_tests.py
+      - name: Verify image source revision
+        env:
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          for target in instance server; do
+            actual=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "traffic-v3:$target")
+            test "$actual" = "$EXPECTED_REVISION"
+          done
+      - name: Report verification scope
+        if: always()
+        run: |
+          echo '### Container verification scope' >> "$GITHUB_STEP_SUMMARY"
+          echo '- See job steps for CPU build and mandatory suite results.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- GPU runtime: NOT RUN on this CPU runner.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- No images or Docker archives are published by this workflow.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Project document checks are not approval of third-party redistribution rights.' >> "$GITHUB_STEP_SUMMARY"

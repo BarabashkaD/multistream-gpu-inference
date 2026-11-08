@@ -28,6 +28,16 @@ FROM ${PYTHON_IMAGE} AS runtime
 ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 OPENBLAS_NUM_THREADS=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 WORKDIR /app
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/BarabashkaD/multistream-gpu-inference" \
+    org.opencontainers.image.revision=$VCS_REF \
+    org.opencontainers.image.authors="Dmitry Veremeev" \
+    org.opencontainers.image.licenses="AGPL-3.0-or-later"
+# This label describes the project; third-party components retain their own licenses.
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
+COPY tools/check_image.py /app/tools/check_image.py
+# Preserve the host-layout default used by tests and command-line configurations.
+RUN ln -s /data /app/data
 
 # Target "instance": the client pipeline and the monitor, with the clip.
 FROM runtime AS instance
