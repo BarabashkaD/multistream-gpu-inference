@@ -13,7 +13,7 @@ import pytest
 
 SUITES = (
     "test_config.py", "test_server_config.py", "test_protocol.py",
-    "test_queueing.py", "test_make_compose.py", "test_image_contents.py", "test_model_provenance.py",
+    "test_queueing.py", "test_make_compose.py", "test_image_contents.py", "test_model_provenance.py", "test_gpu_smoke_contract.py",
 )
 
 
