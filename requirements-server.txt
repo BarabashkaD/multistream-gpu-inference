@@ -1,0 +1,7 @@
+# Linux containers: the inference server and the single-container fleet. Pins copied from requirements.txt.
+--extra-index-url https://download.pytorch.org/whl/cu130
+-r requirements-instance.txt
+torch==2.14.1+cu130
+onnxruntime-gpu==1.31.1
+nvidia-ml-py==13.615.71
+pytest==9.2.0

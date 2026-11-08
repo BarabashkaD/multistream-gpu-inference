@@ -1,0 +1,63 @@
+name: Candidate GPU verification (disabled by policy; no publication)
+on:
+  workflow_dispatch:
+    inputs:
+      instance:
+        description: 'Reviewed immutable ghcr.io instance image@sha256:digest'
+        required: true
+        type: string
+      server:
+        description: 'Reviewed immutable ghcr.io server image@sha256:digest'
+        required: true
+        type: string
+      revision:
+        description: 'Full source commit SHA in both candidate labels'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: candidate-gpu-verification
+  cancel-in-progress: false
+jobs:
+  policy:
+    if: github.ref == 'refs/heads/main' && vars.ENABLE_GPU_VERIFICATION == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Validate exact candidates against reviewed policy
+        env:
+          INSTANCE_IMAGE: ${{ inputs.instance }}
+          SERVER_IMAGE: ${{ inputs.server }}
+          REVISION: ${{ inputs.revision }}
+        run: python -m tools.verify_candidate_policy
+  gpu:
+    needs: policy
+    # Configure required reviewers and main-only deployment BEFORE enabling.
+    environment: gpu-verification
+    # Dedicated disposable Linux host, never the user's computer or a PR runner.
+    runs-on: [self-hosted, linux, x64, mgi-gpu-ephemeral]
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test exact digests without rebuild or publication
+        env:
+          INSTANCE_IMAGE: ${{ inputs.instance }}
+          SERVER_IMAGE: ${{ inputs.server }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          python -m tools.verify_candidate_policy
+          python tools/gpu_smoke.py --instance "$INSTANCE_IMAGE" --server "$SERVER_IMAGE" --revision "$REVISION"
+      - name: Preserve verification evidence, never images
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gpu-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: gpu-report/
+          if-no-files-found: warn
+          retention-days: 14

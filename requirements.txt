@@ -1,0 +1,27 @@
+# Native Windows dependencies for v3, self-contained. Pins copied from v2/requirements-pipeline.txt and the
+# requirements-windows-plan.txt it includes, plus the packages only v3 needs.
+# PyPI has no CUDA torch wheels for Windows, so torch comes from the PyTorch index.
+--extra-index-url https://download.pytorch.org/whl/cu130
+ultralytics==8.4.190
+onnxruntime-gpu==1.31.1
+opencv-python==5.0.0.93
+onnx==1.23.2
+numpy==2.5.4
+torch==2.14.1+cu130
+torchvision==0.29.1+cu130
+lap==0.5.13
+ml-dtypes==0.6.0
+PyNvVideoCodec==2.2.3
+glfw==2.11.0
+PyOpenGL==3.1.10
+cuda-bindings==13.4.4
+cuda-pathfinder==1.8.5
+pytest==9.2.0
+psutil==7.2.2
+nvidia-ml-py==13.615.71
+
+# the monitor's live table
+rich==15.0.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+Pygments==2.21.0
