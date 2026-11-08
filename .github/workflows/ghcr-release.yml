@@ -11,10 +11,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
-    if: github.ref == 'refs/heads/main' && github.event.repository.private == true
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
+      visibility: ${{ steps.policy.outputs.visibility }}
       revision: ${{ steps.policy.outputs.revision }}
       tag: ${{ steps.policy.outputs.tag }}
     steps:
@@ -24,14 +25,22 @@ jobs:
           fetch-depth: 0
       - name: Require tracked authorization for exact source and audience
         id: policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
           policy=compliance/ghcr-release-policy.json
-          jq -e '.schema == 1 and .enabled == true and .visibility == "private" and
+          jq -e '.schema == 1 and .enabled == true and (.visibility == "private" or .visibility == "public") and
             (.authorization_record | type == "string" and length > 0) and
             (.distribution_review | type == "string" and length > 0) and
-            (.audience_review | type == "string" and length > 0)' "$policy"
+            (.audience_review | type == "string" and length > 0) and
+            (if .visibility == "public" then (.public_distribution_review | type == "string" and length > 0) else true end)' "$policy"
+          visibility=$(jq -r .visibility "$policy")
+          test "$GH_REPO" = BarabashkaD/multistream-gpu-inference
+          test "$(gh api "repos/$GH_REPO" --jq .visibility)" = "$visibility"
+          echo "visibility=$visibility" >> "$GITHUB_OUTPUT"
           revision=$(jq -r .source_revision "$policy")
           [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
           git merge-base --is-ancestor "$revision" HEAD
@@ -77,17 +86,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          EXPECTED_VISIBILITY: ${{ needs.build.outputs.visibility }}
           SOURCE_SHA: ${{ needs.build.outputs.revision }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
           test "$GH_REPO" = BarabashkaD/multistream-gpu-inference
-          test "$(gh api "repos/$GH_REPO" --jq .private)" = true
+          [[ "$EXPECTED_VISIBILITY" = private || "$EXPECTED_VISIBILITY" = public ]]
+          test "$(gh api "repos/$GH_REPO" --jq .visibility)" = "$EXPECTED_VISIBILITY"
           # Fail closed on missing/inaccessible packages, never mistake 404 for absent.
           for target in instance server; do
             gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" > "package-$target.json"
-            jq -e --arg repo "$GH_REPO" '.visibility == "private" and .repository.full_name == $repo' "package-$target.json"
+            jq -e --arg repo "$GH_REPO" --arg visibility "$EXPECTED_VISIBILITY" '.visibility == $visibility and .repository.full_name == $repo' "package-$target.json"
           done
           cd transfer
           sha256sum -c SHA256SUMS
@@ -110,7 +121,7 @@ jobs:
             [[ "$digest" =~ @sha256:[0-9a-f]{64}$ ]]
             docker pull "$digest"
             test "$(docker inspect --format '{{.Id}}' "$digest")" = "$expected"
-            gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" | jq -e --arg repo "$GH_REPO" '.visibility == "private" and .repository.full_name == $repo'
+            gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" | jq -e --arg repo "$GH_REPO" --arg visibility "$EXPECTED_VISIBILITY" '.visibility == $visibility and .repository.full_name == $repo'
             printf '%s\n' "$digest" > "../release-assets/$target.ref"
           done
           cd ../release-assets
@@ -137,24 +148,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          EXPECTED_VISIBILITY: ${{ needs.build.outputs.visibility }}
           SOURCE_SHA: ${{ needs.build.outputs.revision }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh api "repos/$GH_REPO" --jq .private)" = true
+          [[ "$EXPECTED_VISIBILITY" = private || "$EXPECTED_VISIBILITY" = public ]]
+          test "$(gh api "repos/$GH_REPO" --jq .visibility)" = "$EXPECTED_VISIBILITY"
           cd release-assets
           sha256sum -c SHA256SUMS
           test "$(cat source-revision.txt)" = "$SOURCE_SHA"
           instance=$(cat instance.ref)
           server=$(cat server.ref)
+          pull_note="Public pulls do not require authentication."
+          if [[ "$EXPECTED_VISIBILITY" = private ]]; then
+            pull_note="GHCR authentication with read:packages is required."
+          fi
           cat > ../notes.md <<EOF
           Source: https://github.com/$GH_REPO/tree/$SOURCE_SHA
           CI: https://github.com/$GH_REPO/actions/runs/$GITHUB_RUN_ID
           Linux/amd64; Contents checks passed for both images; mandatory CPU suites passed in server.
           GPU runtime for these exact published images: NOT TESTED. This is a prerelease, not GPU qualification.
 
-          Pull exact images (GHCR authentication with read:packages is required):
+          Audience: $EXPECTED_VISIBILITY. $pull_note
+          Pull exact images:
               docker pull $instance
               docker pull $server
 
@@ -163,7 +181,7 @@ jobs:
           - https://github.com/users/BarabashkaD/packages/container/package/multistream-gpu-inference-server
 
           Project code: AGPL-3.0-or-later with NOTICE terms; bundled dependencies/assets retain their own terms.
-          Inventory and notices are attached. Private-scope authorization is not public redistribution clearance.
+          Inventory and notices are attached. Publication requires the tracked review for this exact source and audience.
           No latest/stable tag is assigned. No Docker archive is attached.
           EOF
           tar -czf ../image-evidence.tar.gz image-evidence
@@ -175,7 +193,8 @@ jobs:
           gh release download "$RELEASE_TAG" --dir ../downloaded
           for file in source-revision.txt instance.ref server.ref; do cmp "$file" "../downloaded/$file"; done
           cmp ../image-evidence.tar.gz ../downloaded/image-evidence.tar.gz
-          test "$(gh api "repos/$GH_REPO" --jq .private)" = true
+          [[ "$EXPECTED_VISIBILITY" = private || "$EXPECTED_VISIBILITY" = public ]]
+          test "$(gh api "repos/$GH_REPO" --jq .visibility)" = "$EXPECTED_VISIBILITY"
           gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" | jq -e --arg sha "$SOURCE_SHA" '.object.type == "commit" and .object.sha == $sha'
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
           gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease
