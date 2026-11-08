@@ -1,0 +1,181 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Dmitry Veremeev
+# Additional terms under AGPL-3.0 section 7 apply: see NOTICE.
+name: Publish checked images to GHCR and release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ghcr-release
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && github.event.repository.private == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      revision: ${{ steps.policy.outputs.revision }}
+      tag: ${{ steps.policy.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require tracked authorization for exact source and audience
+        id: policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          policy=compliance/ghcr-release-policy.json
+          jq -e '.schema == 1 and .enabled == true and .visibility == "private" and
+            (.authorization_record | type == "string" and length > 0) and
+            (.distribution_review | type == "string" and length > 0) and
+            (.audience_review | type == "string" and length > 0)' "$policy"
+          revision=$(jq -r .source_revision "$policy")
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$revision" HEAD
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "tag=ci-${revision:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          git checkout --detach "$revision"
+          test "$(git rev-parse HEAD)" = "$revision"
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build and check both exact images
+        env:
+          VCS_REF: ${{ steps.policy.outputs.revision }}
+          EXPECTED_REVISION: ${{ steps.policy.outputs.revision }}
+        run: |
+          set -euo pipefail
+          bash tools/build_images.sh --cpu-only
+          docker run --rm --network none traffic-v3:server python tools/run_cpu_tests.py
+          python tools/collect_image_evidence.py
+          mkdir transfer
+          cp -r image-evidence transfer/
+          docker save traffic-v3:instance traffic-v3:server -o transfer/images.tar
+          cd transfer
+          sha256sum images.tar > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: checked-images-${{ github.run_id }}-${{ github.run_attempt }}
+          path: transfer/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: checked-images-${{ github.run_id }}-${{ github.run_attempt }}
+          path: transfer
+      - name: Verify audience, load without execution, push and pull by digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ needs.build.outputs.revision }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GH_REPO" = BarabashkaD/multistream-gpu-inference
+          test "$(gh api "repos/$GH_REPO" --jq .private)" = true
+          # Fail closed on missing/inaccessible packages, never mistake 404 for absent.
+          for target in instance server; do
+            gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" > "package-$target.json"
+            jq -e --arg repo "$GH_REPO" '.visibility == "private" and .repository.full_name == $repo' "package-$target.json"
+          done
+          cd transfer
+          sha256sum -c SHA256SUMS
+          test "$(jq -r .revision image-evidence/images.json)" = "$SOURCE_SHA"
+          docker load -i images.tar
+          mkdir -p ../release-assets
+          cp -r image-evidence ../release-assets/
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          for target in instance server; do
+            image="ghcr.io/barabashkad/multistream-gpu-inference-$target"
+            expected=$(jq -r --arg t "$target" '.images[$t].id' image-evidence/images.json)
+            test "$(docker inspect --format '{{.Id}}' "traffic-v3:$target")" = "$expected"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$expected")" = "$SOURCE_SHA"
+            docker tag "$expected" "$image:$RELEASE_TAG"
+            docker push "$image:$RELEASE_TAG"
+            # Resolve the registry manifest digest, then validate retrieved config identity.
+            docker pull "$image:$RELEASE_TAG"
+            digest=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image:$RELEASE_TAG" | grep "^$image@sha256:" | head -n1)
+            [[ "$digest" =~ @sha256:[0-9a-f]{64}$ ]]
+            docker pull "$digest"
+            test "$(docker inspect --format '{{.Id}}' "$digest")" = "$expected"
+            gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" | jq -e --arg repo "$GH_REPO" '.visibility == "private" and .repository.full_name == $repo'
+            printf '%s\n' "$digest" > "../release-assets/$target.ref"
+          done
+          cd ../release-assets
+          printf '%s\n' "$SOURCE_SHA" > source-revision.txt
+          find . -type f -print0 | sort -z | xargs -0 sha256sum > ../release-checksums
+          mv ../release-checksums SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ghcr-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 14
+  release:
+    needs: [build, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ghcr-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets
+      - name: Release references to both checked registry digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ needs.build.outputs.revision }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GH_REPO" --jq .private)" = true
+          cd release-assets
+          sha256sum -c SHA256SUMS
+          test "$(cat source-revision.txt)" = "$SOURCE_SHA"
+          instance=$(cat instance.ref)
+          server=$(cat server.ref)
+          cat > ../notes.md <<EOF
+          Source: https://github.com/$GH_REPO/tree/$SOURCE_SHA
+          CI: https://github.com/$GH_REPO/actions/runs/$GITHUB_RUN_ID
+          Linux/amd64; Contents checks passed for both images; mandatory CPU suites passed in server.
+          GPU runtime for these exact published images: NOT TESTED. This is a prerelease, not GPU qualification.
+
+          Pull exact images (GHCR authentication with read:packages is required):
+              docker pull $instance
+              docker pull $server
+
+          Packages:
+          - https://github.com/users/BarabashkaD/packages/container/package/multistream-gpu-inference-instance
+          - https://github.com/users/BarabashkaD/packages/container/package/multistream-gpu-inference-server
+
+          Project code: AGPL-3.0-or-later with NOTICE terms; bundled dependencies/assets retain their own terms.
+          Inventory and notices are attached. Private-scope authorization is not public redistribution clearance.
+          No latest/stable tag is assigned. No Docker archive is attached.
+          EOF
+          tar -czf ../image-evidence.tar.gz image-evidence
+          # matching-refs succeeds with [] when absent; authentication errors fail closed.
+          test "$(gh api "repos/$GH_REPO/git/matching-refs/tags/$RELEASE_TAG" --jq length)" = 0
+          gh api --method POST "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$SOURCE_SHA"
+          gh release create "$RELEASE_TAG" --verify-tag --target "$SOURCE_SHA" --draft --prerelease --latest=false --title "$RELEASE_TAG" --notes-file ../notes.md source-revision.txt instance.ref server.ref ../image-evidence.tar.gz
+          mkdir ../downloaded
+          gh release download "$RELEASE_TAG" --dir ../downloaded
+          for file in source-revision.txt instance.ref server.ref; do cmp "$file" "../downloaded/$file"; done
+          cmp ../image-evidence.tar.gz ../downloaded/image-evidence.tar.gz
+          test "$(gh api "repos/$GH_REPO" --jq .private)" = true
+          gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" | jq -e --arg sha "$SOURCE_SHA" '.object.type == "commit" and .object.sha == $sha'
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease
