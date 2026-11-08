@@ -6,5 +6,7 @@
   "authorization_record": "",
   "distribution_review": "",
   "audience_review": "",
-  "public_distribution_review": ""
+  "public_distribution_review": "",
+  "bootstrap_enabled": false,
+  "bootstrap_review": ""
 }

@@ -4,6 +4,11 @@
 name: Publish checked images to GHCR and release
 on:
   workflow_dispatch:
+    inputs:
+      bootstrap_packages:
+        description: Create missing packages privately with empty markers (requires tracked authorization)
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -15,6 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
+      bootstrap: ${{ steps.policy.outputs.bootstrap }}
       visibility: ${{ steps.policy.outputs.visibility }}
       revision: ${{ steps.policy.outputs.revision }}
       tag: ${{ steps.policy.outputs.tag }}
@@ -26,6 +32,7 @@ jobs:
       - name: Require tracked authorization for exact source and audience
         id: policy
         env:
+          BOOTSTRAP_REQUESTED: ${{ inputs.bootstrap_packages }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         shell: bash
@@ -37,6 +44,12 @@ jobs:
             (.distribution_review | type == "string" and length > 0) and
             (.audience_review | type == "string" and length > 0) and
             (if .visibility == "public" then (.public_distribution_review | type == "string" and length > 0) else true end)' "$policy"
+          if [[ "$BOOTSTRAP_REQUESTED" = true ]]; then
+            jq -e '.bootstrap_enabled == true and (.bootstrap_review | type == "string" and length > 0)' "$policy"
+          else
+            test "$BOOTSTRAP_REQUESTED" = false
+          fi
+          echo "bootstrap=$BOOTSTRAP_REQUESTED" >> "$GITHUB_OUTPUT"
           visibility=$(jq -r .visibility "$policy")
           test "$GH_REPO" = BarabashkaD/multistream-gpu-inference
           test "$(gh api "repos/$GH_REPO" --jq .visibility)" = "$visibility"
@@ -84,6 +97,7 @@ jobs:
           path: transfer
       - name: Verify audience, load without execution, push and pull by digest
         env:
+          BOOTSTRAP_REQUESTED: ${{ needs.build.outputs.bootstrap }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           EXPECTED_VISIBILITY: ${{ needs.build.outputs.visibility }}
@@ -95,10 +109,37 @@ jobs:
           test "$GH_REPO" = BarabashkaD/multistream-gpu-inference
           [[ "$EXPECTED_VISIBILITY" = private || "$EXPECTED_VISIBILITY" = public ]]
           test "$(gh api "repos/$GH_REPO" --jq .visibility)" = "$EXPECTED_VISIBILITY"
-          # Fail closed on missing/inaccessible packages, never mistake 404 for absent.
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
           for target in instance server; do
-            gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" > "package-$target.json"
-            jq -e --arg repo "$GH_REPO" --arg visibility "$EXPECTED_VISIBILITY" '.visibility == $visibility and .repository.full_name == $repo' "package-$target.json"
+            endpoint="users/BarabashkaD/packages/container/multistream-gpu-inference-$target"
+            # 404 is ambiguous: do not upload project bytes based on it.
+            status=$(curl --silent --show-error --output "package-$target.json" --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/$endpoint")
+            if [[ "$status" = 404 && "$BOOTSTRAP_REQUESTED" = true ]]; then
+              # An empty, non-executable marker is safe even if 404 hid an existing package.
+              # GITHUB_TOKEN and the source label link a newly created package to this repo.
+              marker="ghcr.io/barabashkad/multistream-gpu-inference-$target:bootstrap-$RELEASE_TAG"
+              tar -cf - --files-from /dev/null | docker import \
+                --change "LABEL org.opencontainers.image.source=https://github.com/$GH_REPO" - "$marker"
+              docker push "$marker"
+              gh api "$endpoint" > "package-$target.json"
+              jq -e --arg repo "$GH_REPO" '.visibility == "private" and .repository.full_name == $repo' "package-$target.json"
+            else
+              test "$status" = 200
+              jq -e --arg repo "$GH_REPO" --arg visibility "$EXPECTED_VISIBILITY" --arg bootstrap "$BOOTSTRAP_REQUESTED" \
+                '.repository.full_name == $repo and (.visibility == $visibility or ($bootstrap == "true" and .visibility == "private"))' "package-$target.json"
+            fi
+          done
+          # Both namespaces now exist. Never change their visibility automatically.
+          # Public-mode bootstrap stops here until the owner explicitly makes both public.
+          for target in instance server; do
+            gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" | \
+              jq -e --arg repo "$GH_REPO" --arg visibility "$EXPECTED_VISIBILITY" '.visibility == $visibility and .repository.full_name == $repo' || {
+                echo "::error::Package audience mismatch. Bootstrap creates private packages only. Separately authorize public visibility, then rerun without bootstrap."
+                exit 1
+              }
           done
           cd transfer
           sha256sum -c SHA256SUMS
@@ -106,8 +147,6 @@ jobs:
           docker load -i images.tar
           mkdir -p ../release-assets
           cp -r image-evidence ../release-assets/
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          trap 'docker logout ghcr.io' EXIT
           for target in instance server; do
             image="ghcr.io/barabashkad/multistream-gpu-inference-$target"
             expected=$(jq -r --arg t "$target" '.images[$t].id' image-evidence/images.json)
@@ -139,6 +178,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      packages: read
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -196,5 +236,9 @@ jobs:
           [[ "$EXPECTED_VISIBILITY" = private || "$EXPECTED_VISIBILITY" = public ]]
           test "$(gh api "repos/$GH_REPO" --jq .visibility)" = "$EXPECTED_VISIBILITY"
           gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" | jq -e --arg sha "$SOURCE_SHA" '.object.type == "commit" and .object.sha == $sha'
+          for target in instance server; do
+            gh api "users/BarabashkaD/packages/container/multistream-gpu-inference-$target" | \
+              jq -e --arg repo "$GH_REPO" --arg visibility "$EXPECTED_VISIBILITY" '.visibility == $visibility and .repository.full_name == $repo'
+          done
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
           gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease

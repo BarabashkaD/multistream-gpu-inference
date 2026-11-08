@@ -10,11 +10,12 @@ nothing. The merged PR #7 corrected the GPU harness, not registry publication.
 - `ghcr.io/barabashkad/multistream-gpu-inference-instance`
 - `ghcr.io/barabashkad/multistream-gpu-inference-server`
 
-Existing packages linked to this exact repository are accepted only when their
-visibility and the repository visibility both match the explicit policy
-(`private` or `public`). The default remains disabled and private. A 403/404 is a blocker, not proof that a name is unused. This intentionally
-requires an authorized first-package bootstrap outside this workflow if packages
-do not exist. Do not bootstrap, change visibility or grant access implicitly.
+Existing packages must be linked to this repository and match the explicit
+policy visibility (`private` or `public`), as must the repository itself.
+The default remains disabled and private. Missing packages can be initialized
+only with the separately approved bootstrap option described below. HTTP 403,
+other errors, or accessible packages with mismatched visibility/link stop the run.
+A 404 is ambiguous, not proof that a name is unused.
 Review package collaborators, inherited repository access, and Actions access
 before enabling. The API visibility/link check cannot enumerate all recipients.
 
@@ -83,10 +84,11 @@ References (checked 2026-11-08):
 1. Review the exact source, repository history, Actions artifacts/logs and bundled
    component obligations before making anything public. Changing repository
    visibility does not change existing package visibility.
-2. Separately authorize and provision both packages, link them to this repository,
-   grant this repository Actions access, and set the intended visibility. Missing
-   or inaccessible packages remain a hard blocker; this workflow never creates a
-   first package implicitly or changes visibility.
+2. Provision missing packages through the explicit bootstrap below, or use
+   existing packages linked to this repository with Actions access. Separately
+   authorize and set public visibility for both packages. This workflow does not
+   change package visibility; GitHub warns that public packages cannot be made
+   private again.
 3. In a reviewed policy PR set `visibility: "public"`, an existing source SHA,
    approval/audience/distribution references, and `public_distribution_review`
    documenting public redistribution clearance. Set `enabled: true` only after
@@ -97,3 +99,36 @@ References (checked 2026-11-08):
 
 Visibility can be changed concurrently by administrators; API checks reduce
 accidental audience mismatch but cannot lock those settings transactionally.
+
+## First-package bootstrap
+
+Package creation is supported with the existing `GITHUB_TOKEN`, not a new PAT.
+Normal dispatch still fails closed on missing/inaccessible packages.
+For an approved first publication:
+- Record authorization for creating the two named packages and marker tags in
+  `bootstrap_review`, set `bootstrap_enabled: true` in the reviewed policy,
+  and dispatch with `bootstrap_packages: true`. The normal enabled/exact-source/
+  distribution/audience gates still apply; public mode also needs its public review.
+- On HTTP 404 only, CI imports and pushes an empty filesystem marker with the
+  repository source label. No project files, model weights, or dependency bytes
+  are in this marker; it is not an executable application image. Thus a hidden
+  pre-existing package does not receive project bytes based on an ambiguous 404.
+- GHCR creates new packages private by default and links Actions-created packages
+  to the workflow repository. CI verifies both properties after each marker push.
+  If a collision or unexpected access/visibility/link is detected, it stops.
+- After both namespaces exist, CI checks the intended audience again before
+  uploading either real image. In public mode newly created private packages
+  deliberately stop the run with an actionable error, without a release.
+- The owner must separately approve and change both package visibilities in
+  GitHub package settings. This is irreversible; it is not performed by this
+  workflow. Then rerun without the bootstrap checkbox. Only verified public
+  packages receive a public release, and package visibility/link are checked
+  again immediately before draft promotion.
+- Successful private-mode bootstrap can continue to checked-image publication
+  and a private release in the same run.
+
+Marker tags are `bootstrap-ci-<source>-<run>-<attempt>`. They remain for inspection;
+no package versions are deleted automatically. A failed run may leave one marker
+or both private packages. Inspect the actual state rather than assuming rollback.
+Existing package Actions-access failures still require an authorized owner setting
+change. Empty markers do not replace the image inventory or redistribution review.
