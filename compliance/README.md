@@ -13,3 +13,28 @@ Each built image has `/app/compliance/inventory.json`: installed Python versions
 - Torch, ONNX Runtime, Triton, nested wheel libraries and Debian packages: installed inventory is now generated, but complete source/notice and redistribution review remains pending.
 
 For each applicable copyleft binary obligation, the release must identify exact source, modifications/build information, delivery method and retention requirements. A link to this application's Git commit does not universally satisfy dependencies' obligations. Full dependency locks/hash installs and repeatable exporter OS packages remain follow-up work; current version pins and inventory do not promise reproducible bytes.
+
+## Expanded evidence (inventory schema 2)
+
+The inventory records original inline BSD/Apache headers as file hashes, separate
+from full license texts. It records metadata-only distributions (notably
+`cuda-toolkit`) without implying that their metadata licenses separately installed
+CUDA payloads. Native library/tool paths, sizes and hashes are recorded from Python
+wheel file lists, including renamed libraries and ELF tools. These lists still do
+not cover every OS/base-image binary and are not redistribution approval.
+
+For the audited `flatbuffers==25.12.19`, the wheel contains Apache-2.0 headers and a
+license URL but omits the full license text. `licenses/Apache-2.0.txt` supplies the
+standard, unmodified Apache License 2.0 text (copied from Debian's standard
+`/usr/share/common-licenses/Apache-2.0` and independently matched byte-for-byte to
+https://www.apache.org/licenses/LICENSE-2.0.txt; SHA256
+`cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`). This is associated only with that
+verified package version in inventory; it does not replace upstream copyright
+headers or prove correspondence to an unavailable upstream version tag.
+
+Debian entries now include source package/version and installed copyright-file
+hashes. Interpreter identity/license evidence is separate because the official
+Python image's `/usr/local` CPython is not represented by dpkg. Neither field
+provides corresponding-source archives automatically. Triton bundled tools,
+PyNvVideoCodec's nested CUDA payload and all existing distribution blockers still
+require explicit review against the actual binaries and applicable terms.

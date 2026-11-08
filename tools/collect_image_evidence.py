@@ -32,6 +32,7 @@ def collect(output):
                      '/app/THIRD_PARTY_NOTICES.md', '/opt/venv/external/ffmpeg/readme.txt']
             if target == 'server':
                 files.append('/app/models/manifest.json')
+                files.append('/app/compliance/licenses/Apache-2.0.txt')
             for path in files:
                 run('docker', 'cp', f'{cid}:{path}', str(folder / Path(path).name))
         finally:
