@@ -93,7 +93,7 @@ def test_evidence_collector_copies_only_selected_text(monkeypatch, tmp_path):
     assert set(manifest['images']) == {'instance', 'server'}
     assert manifest['revision'] == R
     copied = [call[2] for call in calls if call[1] == 'cp']
-    assert len(copied) == 11
+    assert len(copied) == 12
     assert sum(path.endswith('/manifest.json') for path in copied) == 1
     assert all(path.endswith(('.json', '.md', '.txt', '/LICENSE', '/NOTICE')) for path in copied)
     assert all(call[1] not in ('run', 'push', 'save') for call in calls)
