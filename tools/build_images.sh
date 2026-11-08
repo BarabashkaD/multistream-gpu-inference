@@ -4,18 +4,16 @@
 # Additional terms under AGPL-3.0 section 7 apply: see NOTICE.
 # Prepares and builds the self-contained v3 images traffic-v3:instance and traffic-v3:server on Ubuntu 24.04.
 #
-# Needs only Docker (with the buildx plugin), the NVIDIA driver and the NVIDIA Container Toolkit. Each step runs
-# only when needed:
-#   1. checks that Docker, buildx and GPU access in containers work;
-#   2. downloads the clip to <repository>/data if it is missing or its SHA-256 differs;
-#   3. exports the missing ONNX models (models/b<size>.onnx) in a throwaway CPU-only container;
+# Needs Docker/buildx, curl and SHA-256 tools. GPU mode also needs the NVIDIA driver and Container Toolkit.
+#   1. checks Docker/buildx (and GPU access unless --cpu-only);
+#   2. downloads and verifies the clip;
+#   3. exports missing ONNX models in a throwaway CPU-only container;
 #   4. builds both images with the clip as a named build context;
-#   5. smoke-tests them (unless --skip-tests): the clip in the instance image, the models and the CUDA provider in
-#      the server image;
-#   6. with --save-to, writes both images to one tar file for `docker load` on another machine.
-# tools/build_images.ps1 does the same on Windows.
+#   5. always verifies contents, then runs the GPU smoke test unless disabled;
+#   6. optionally writes both images to a tar file for docker load.
+# CPU-only mode is currently supported by this Linux script, not build_images.ps1.
 #
-# Usage: tools/build_images.sh [--sizes 1,8,16] [--save-to PATH] [--skip-tests]
+# Usage: tools/build_images.sh [--sizes 1,8,16] [--save-to PATH] [--skip-tests] [--cpu-only]
 set -euo pipefail
 
 v3="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,13 +23,13 @@ clip_dir="$repo/data"
 clip="$clip_dir/$clip_name"
 clip_url="https://videos.pexels.com/video-files/36304379/15396218_1920_1080_25fps.mp4"
 clip_sha256="d105fb6777e82caafadc3763098f533864cf294448d41ac195e17c69e068b278"
-clip_bytes=10603143
 user_agent="traffic-v3-build-script/1.0"
 images=(traffic-v3:instance traffic-v3:server)
 
 sizes_arg="1,8,16"
 save_to=""
 skip_tests=0
+cpu_only=0
 
 # Prints a progress line.
 say() { printf '%s\n' "$*"; }
@@ -44,10 +42,11 @@ fail() {
 
 # Prints the command-line help; shared by --help and the unknown-argument error.
 usage() {
-    say "Usage: $0 [--sizes 1,8,16] [--save-to PATH] [--skip-tests]"
+    say "Usage: $0 [--sizes 1,8,16] [--save-to PATH] [--skip-tests] [--cpu-only]"
     say "  --sizes       batch sizes of the models that must exist (default 1,8,16)"
     say "  --save-to     write both images to this tar file (or to traffic-v3-images.tar in this folder)"
-    say "  --skip-tests  skip the smoke test"
+    say "  --skip-tests  skip the GPU smoke test (contents checks always run)"
+    say "  --cpu-only    build and check contents without GPU access; GPU tests NOT RUN"
 }
 
 while [ $# -gt 0 ]; do
@@ -55,6 +54,7 @@ while [ $# -gt 0 ]; do
         --sizes) [ $# -ge 2 ] || fail "--sizes needs a value"; sizes_arg="$2"; shift 2 ;;
         --save-to) [ $# -ge 2 ] || fail "--save-to needs a value"; save_to="$2"; shift 2 ;;
         --skip-tests) skip_tests=1; shift ;;
+        --cpu-only) cpu_only=1; skip_tests=1; shift ;;
         -h | --help) usage; exit 0 ;;
         *) usage >&2; fail "unknown argument: $1" ;;
     esac
@@ -85,6 +85,7 @@ fi
 say "[1/6] Docker: buildx ${buildx_version}"
 
 docker pull "$base_image" > /dev/null || fail "pulling $base_image failed: check the network and that Docker can reach its registry"
+if [ "$cpu_only" -eq 0 ]; then
 if ! docker run --rm --gpus all "$base_image" nvidia-smi > /dev/null; then
     cat >&2 << 'EOF'
 GPU access in containers failed. First check the NVIDIA driver on the host (nvidia-smi). Then install the
@@ -103,6 +104,9 @@ EOF
     exit 1
 fi
 say "[1/6] Docker: GPU access ok"
+else
+    say "[1/6] GPU access: NOT TESTED (--cpu-only)"
+fi
 
 # 2. Clip
 # Succeeds when the file's SHA-256 is the expected one, which also catches a truncated download.
@@ -153,21 +157,31 @@ else
 fi
 
 # 4. Build
+revision="${VCS_REF:-$(git -C "$v3" rev-parse HEAD 2>/dev/null || printf unknown)}"
 for image in "${images[@]}"; do
     say "[4/6] Build: $image"
-    docker build --build-context "clip=$clip_dir" --target "${image#*:}" -t "$image" "$v3" \
+    docker build --build-arg "VCS_REF=$revision" --build-context "clip=$clip_dir" --target "${image#*:}" -t "$image" "$v3" \
         || fail "building $image failed (see the output above)"
 done
 say "[4/6] Build: both images built"
 
-# 5. Smoke test
+# 5. Mandatory CPU contents checks, followed by the optional GPU smoke test.
+expected_documents="{"
+separator=""
+for document in LICENSE NOTICE THIRD_PARTY_NOTICES.md; do
+    hash="$(sha256sum "$v3/$document" | cut -d ' ' -f 1)"
+    expected_documents+="$separator\"$document\":\"$hash\""
+    separator=","
+done
+expected_documents+="}"
+for image in "${images[@]}"; do
+    docker run --rm --network none "$image" python tools/check_image.py \
+        --target "${image#*:}" --sizes "$sizes_arg" --expected-documents "$expected_documents" \
+        || fail "CPU contents check failed for $image"
+done
 if [ "$skip_tests" -eq 1 ]; then
-    say "[5/6] Smoke test: skipped (--skip-tests)"
+    say "[5/6] GPU smoke test: NOT RUN (CPU contents checks passed)"
 else
-    bytes="$(docker run --rm traffic-v3:instance python -c "import os; print(os.path.getsize('/data/$clip_name'))")" \
-        || fail "the clip is missing from traffic-v3:instance"
-    [ "$bytes" = "$clip_bytes" ] || fail "the clip in traffic-v3:instance has $bytes bytes, expected $clip_bytes"
-    say "[5/6] Smoke test: clip in traffic-v3:instance ok ($bytes bytes)"
     probe="import os; from pathlib import Path; from server.detector import BatchDetector; "
     probe+="BatchDetector(Path('models'), tuple(int(s) for s in os.environ['SIZES'].split(',')), 0); "
     probe+="print('models and CUDA provider ok')"
@@ -190,4 +204,4 @@ else
     say "[6/6] Save: on the other machine run: docker load -i $(basename -- "$file")"
 fi
 
-say "Done: ${images[0]} and ${images[1]} are ready."
+say "Done: ${images[0]} and ${images[1]} built and contents checked. Redistribution review is separate."
