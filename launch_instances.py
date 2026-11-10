@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf", type=float, default=.25)
     parser.add_argument("--iou", type=float, default=.7)
     parser.add_argument("--imgsz", type=int, default=640)
+    parser.add_argument("--batch-size", type=int, default=1, help="Sequential frames per inference (default: 1)")
     parser.add_argument("--loops", type=int, default=1, help="1/N finite passes, 0 until user stop")
     parser.add_argument("--max-frames", type=int, default=0, help="Per-loop test bound; zero means full source")
     parser.add_argument("--headless", action="store_true", help="Pass --no-display to every child")
@@ -80,6 +81,7 @@ def child_command(args: argparse.Namespace, instance_id: str, output_path: Path 
         "--conf", str(args.conf),
         "--iou", str(args.iou),
         "--imgsz", str(args.imgsz),
+        "--batch-size", str(args.batch_size),
         "--loops", str(args.loops),
         "--max-frames", str(args.max_frames),
     ]
@@ -122,6 +124,8 @@ def main() -> int:
     Raises ValueError for invalid counts or an output folder with --loops 0, FileNotFoundError for a missing input
     or model, and FileExistsError if the run or output folder already exists."""
     args = parse_args()
+    if args.batch_size < 1:
+        raise ValueError("--batch-size must be >= 1")
     if args.instances < 1:
         raise ValueError("--instances must be >= 1")
     if args.loops < 0:

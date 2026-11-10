@@ -14,6 +14,8 @@ import argparse
 from collections import deque
 import json
 import os
+import signal
+import numpy as np
 import sys
 import threading
 import time
@@ -108,6 +110,7 @@ def parse_args():
     p.add_argument("--conf", type=float, default=.25)
     p.add_argument("--iou", type=float, default=.7)
     p.add_argument("--imgsz", type=int, default=640)
+    p.add_argument("--batch-size", type=int, default=1, help="Sequential frames per inference; requires matching static ONNX export")
     p.add_argument("--backend", choices=("auto", "cuda", "cpu"), default="auto")
     p.add_argument("--loops", type=int, default=1, help="1=single pass, N=finite passes, 0=repeat until Q/Esc/window close/Ctrl-C")
     p.add_argument("--instance-id", default="single", help="Label used in GUI title and JSON")
@@ -205,178 +208,146 @@ def loop_output_path(base: Path | None, loop_id: int, total_loops: int) -> Path 
     return base.with_name(f"{base.stem}-loop-{loop_id:03d}{suffix}")
 
 
-def run_one_loop(
-    args,
-    reader,
-    model,
-    backend,
-    target_size,
-    loop_id,
-    output_path,
-    mailbox,
-    stop_event,
-    runtime,
-):
-    """Processes one pass over the clip: reads each frame, detects and tracks, then annotates and records or
-    displays it as asked. Stops early at --max-frames or when `stop_event` is set. Returns this loop's stats dict,
-    including private "_" keys that process_stream removes. Fills runtime["actual"] with the ONNX providers the
-    first time they can be read. Raises RuntimeError if no frames decode, the frame count differs from the
-    source, the decoder input is invalid, or the CUDA decoder memory was never verified. Always closes the writer."""
-    writer = None
-    frame_count = 0
-    stopped = False
-    processed_times = []
-    loop_start = time.monotonic()
-    # ByteTrack uses no image content, so NVDEC frames can stay on the GPU until one is needed for drawing.
-    shape_only_tracker = is_nvdec(reader) and "bytetrack" in Path(args.tracker).name.lower()
-    host_before_track = not is_nvdec(reader) or not shape_only_tracker
-    async_display = mailbox is not None
+def validate_model_shape(path, batch_size, imgsz):
+    """Reject silent AutoBackend splitting and unsupported dynamic/non-square inputs."""
+    import onnx
+    graph = onnx.load(str(path), load_external_data=False).graph
+    shape = [d.dim_value if d.HasField("dim_value") else None
+             for d in graph.input[0].type.tensor_type.shape.dim]
+    expected = [batch_size, 3, imgsz, imgsz]
+    if shape != expected:
+        raise ValueError(f"ONNX input {shape} does not match {expected}; export with --batch-size {batch_size} --imgsz {imgsz}")
+    return shape
 
-    if output_path is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        writer = cv2.VideoWriter(
-            str(output_path),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            reader.fps,
-            (reader.width, reader.height),
-        )
-        if not writer.isOpened():
-            raise RuntimeError(f"OpenCV could not open {output_path}")
+
+def run_one_loop(args, reader, model, backend, target_size, loop_id,
+                 output_path, mailbox, stop_event, runtime):
+    """Batch consecutive frames, tracking each real frame in order; flush at EOF/stop.
+
+    Ultralytics 8.4.190 pads a short static batch and trims raw outputs before
+    tracking. Never pad source frames here: padding must not advance ByteTrack.
+    """
+    batch_size = args.batch_size
+    writer = None
+    read_count = processed = written = calls = 0
+    stopped = False
+    processed_times = deque(maxlen=4096)
+    fill_wait = deque(maxlen=4096)
+    read_to_tracked = deque(maxlen=4096)
+    batch_sizes = {}
+    loop_start = time.monotonic()
+    nvdec = is_nvdec(reader)
+    shape_only = nvdec and "bytetrack" in Path(args.tracker).name.lower()
+    host_before_track = not nvdec or not shape_only
+    pending = []
+
+    def flush():
+        nonlocal processed, written, calls
+        if not pending:
+            return
+        ready = time.monotonic()
+        k = len(pending)
+        fill_wait.extend((ready - item[3]) * 1000 for item in pending)
+        kwargs = dict(persist=True, tracker=args.tracker, conf=args.conf,
+                      iou=args.iou, imgsz=target_size, batch=batch_size,
+                      device=0 if backend == "cuda" else "cpu", verbose=False)
+        try:
+            if nvdec:
+                inputs = pending[0][1] if k == 1 else reader._torch.cat([item[1] for item in pending], dim=0)
+                CudaOrigImagePredictor.external_orig_imgs = [
+                    item[0] if item[0] is not None else reader.shape_only_image for item in pending]
+                results = model.track(inputs, predictor=CudaOrigImagePredictor, **kwargs)
+            else:
+                inputs = pending[0][0] if batch_size == 1 else [item[0] for item in pending]
+                results = model.track(inputs, **kwargs)
+        finally:
+            CudaOrigImagePredictor.external_orig_imgs = None
+        if len(results) != k:
+            raise RuntimeError(f"Expected {k} real results, received {len(results)}")
+        calls += 1
+        batch_sizes[k] = batch_sizes.get(k, 0) + 1
+        completed = time.monotonic()
+        processed_times.extend([completed] * k)
+        read_to_tracked.extend((completed - item[3]) * 1000 for item in pending)
+        if runtime["actual"] is None:
+            session = getattr(getattr(getattr(model, "predictor", None), "model", None), "session", None)
+            if session is not None:
+                runtime["actual"] = session.get_providers()
+        for (frame, _, device_frame, _, frame_id), result in zip(pending, results):
+            processed += 1
+            if mailbox is not None and writer is None and mailbox.has_pending():
+                mailbox.note_drop()
+                continue
+            if frame is None and (writer is not None or mailbox is not None):
+                # Each entry owns its decoded RGB tensor, not reader.last_device_frame.
+                frame = reader.host_frame(device_frame)
+            if frame is not None and (writer is not None or mailbox is not None):
+                out = annotate(frame, result, loop_id, frame_id,
+                               processed / max(time.monotonic() - loop_start, 1e-6), copy_frame=False)
+                if writer is not None:
+                    writer.write(out)
+                    written += 1
+                if mailbox is not None:
+                    mailbox.publish((loop_id, frame_id, out))
+        pending.clear()
 
     try:
-        print(f"[loop {loop_id}] start frames={reader.frame_count} output={output_path}")
+        if output_path is not None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"),
+                                     reader.fps, (reader.width, reader.height))
+            if not writer.isOpened():
+                raise RuntimeError(f"OpenCV could not open {output_path}")
+        print(f"[loop {loop_id}] start frames={reader.frame_count} batch={batch_size} output={output_path}")
         while True:
             if stop_event is not None and stop_event.is_set():
                 stopped = True
                 break
-
+            if args.max_frames and read_count >= args.max_frames:
+                break
             ok, frame, timestamp = reader.read(host_frame=host_before_track)
             if not ok:
                 break
+            read_at = time.monotonic()
+            read_count += 1
             if host_before_track and (frame is None or frame.shape[:2] != (reader.height, reader.width)):
-                raise RuntimeError(f"Unexpected decoder frame shape: {None if frame is None else frame.shape}")
-
-            frame_count += 1
-            processed_times.append(time.monotonic())
-            if frame_count == 1:
-                print(
-                    f"[decoder] loop={loop_id} first_shape={None if frame is None else frame.shape} "
-                    f"dtype={None if frame is None else frame.dtype} "
-                    f"memory_bytes={getattr(reader, 'encoded_bytes_len', None)}"
-                )
-
-            if is_nvdec(reader):
+                raise RuntimeError("Unexpected decoder frame shape")
+            detector_input = device_frame = None
+            if nvdec:
                 detector_input, prep = reader.cuda_input(target_size)
-                if (
-                    detector_input.device.type != "cuda"
-                    or detector_input.dtype != reader._torch.float32
-                    or tuple(detector_input.shape) != (1, 3, target_size, target_size)
-                ):
-                    raise RuntimeError(
-                        f"Invalid CUDA detector input: device={detector_input.device} "
-                        f"dtype={detector_input.dtype} shape={tuple(detector_input.shape)}"
-                    )
-                if frame_count == 1:
-                    value_range = (float(detector_input.min().item()), float(detector_input.max().item()))
-                    if value_range[0] < 0.0 or value_range[1] > 1.0:
-                        raise RuntimeError(f"Invalid CUDA detector input range: {value_range}")
-                    print(f"[preprocess] loop={loop_id} range={value_range} letterbox={prep}")
-                CudaOrigImagePredictor.external_orig_imgs = [
-                    frame if frame is not None else reader.shape_only_image
-                ]
-                try:
-                    results = model.track(
-                        detector_input,
-                        predictor=CudaOrigImagePredictor,
-                        persist=True,
-                        tracker=args.tracker,
-                        conf=args.conf,
-                        iou=args.iou,
-                        imgsz=target_size,
-                        device=0,
-                        verbose=False,
-                    )
-                finally:
-                    CudaOrigImagePredictor.external_orig_imgs = None
-            else:
-                results = model.track(
-                    frame,
-                    persist=True,
-                    tracker=args.tracker,
-                    conf=args.conf,
-                    iou=args.iou,
-                    imgsz=args.imgsz,
-                    device=0 if backend == "cuda" else "cpu",
-                    verbose=False,
-                )
-
-            if runtime["actual"] is None:
-                predictor = getattr(model, "predictor", None)
-                backend_model = getattr(predictor, "model", None)
-                session = getattr(backend_model, "session", None)
-                if session is not None and hasattr(session, "get_providers"):
-                    runtime["actual"] = session.get_providers()
-                    print(f"[backend] Ultralytics session providers={runtime['actual']}")
-
-            if is_nvdec(reader) and frame is None and (writer is not None or async_display):
-                if async_display and writer is None and mailbox.has_pending():
-                    mailbox.note_drop()
-                    if args.max_frames and frame_count >= args.max_frames:
-                        break
-                    continue
-                frame = reader.host_frame()
-            elif async_display and writer is None and mailbox.has_pending():
-                mailbox.note_drop()
-                if args.max_frames and frame_count >= args.max_frames:
-                    break
-                continue
-
-            if frame is not None:
-                out = annotate(
-                    frame,
-                    results[0],
-                    loop_id,
-                    frame_count,
-                    frame_count / max(time.monotonic() - loop_start, 1e-6),
-                    copy_frame=False,
-                )
-                if writer is not None:
-                    writer.write(out)
-                if mailbox is not None:
-                    mailbox.publish((loop_id, frame_count, out))
-
-            if args.max_frames and frame_count >= args.max_frames:
-                print(f"[loop {loop_id}] stopped at --max-frames={args.max_frames}")
-                break
-
-        if not frame_count and not stopped:
+                if (detector_input.device.type != "cuda" or detector_input.dtype != reader._torch.float32
+                        or tuple(detector_input.shape) != (1, 3, target_size, target_size)):
+                    raise RuntimeError("Invalid CUDA detector input")
+                if read_count == 1:
+                    low, high = float(detector_input.min().item()), float(detector_input.max().item())
+                    if low < 0 or high > 1:
+                        raise RuntimeError(f"Invalid CUDA input range: {low}, {high}")
+                if frame is None and (writer is not None or mailbox is not None):
+                    device_frame = reader.last_device_frame
+            pending.append((frame, detector_input, device_frame, read_at, read_count))
+            if len(pending) == batch_size:
+                flush()
+        flush()
+        if not read_count and not stopped:
             raise RuntimeError(f"Loop {loop_id} decoded no frames")
-        if (
-            not args.max_frames
-            and not stopped
-            and reader.frame_count
-            and frame_count != reader.frame_count
-        ):
-            raise RuntimeError(
-                f"Loop {loop_id} frame count mismatch: expected {reader.frame_count}, got {frame_count}"
-            )
-        if is_nvdec(reader) and frame_count and not reader.device_verified:
-            raise RuntimeError(f"Loop {loop_id} did not verify CUDA decoder memory")
-
+        if not args.max_frames and not stopped and reader.frame_count and read_count != reader.frame_count:
+            raise RuntimeError(f"Loop {loop_id} frame count mismatch: expected {reader.frame_count}, got {read_count}")
+        if nvdec and read_count and not reader.device_verified:
+            raise RuntimeError("CUDA decoder memory was not verified")
         elapsed = max(time.monotonic() - loop_start, 1e-6)
-        return {
-            "loop": loop_id,
-            "frames_processed": frame_count,
-            "frames_written": frame_count if writer is not None else 0,
-            "output": str(output_path) if output_path is not None else None,
-            "processing_seconds": elapsed,
-            "processing_fps": frame_count / elapsed if frame_count else 0.0,
-            "stopped_by_user": stopped,
-            "_processed_times": processed_times,
-            "_start": loop_start,
-            "_end": time.monotonic(),
-        }
+        def percentiles(values):
+            return {"p50": float(np.percentile(values, 50)), "p95": float(np.percentile(values, 95))} if values else {"p50": 0.0, "p95": 0.0}
+        return dict(loop=loop_id, frames_read=read_count, frames_processed=processed,
+                    frames_written=written, inference_batches=calls, batch_sizes=batch_sizes,
+                    batch_fill_wait_ms=percentiles(fill_wait), read_to_batch_complete_ms=percentiles(read_to_tracked),
+                    latency_samples_retained=len(read_to_tracked),
+                    output=str(output_path) if output_path else None,
+                    processing_seconds=elapsed, processing_fps=processed / elapsed,
+                    stopped_by_user=stopped, _processed_times=processed_times,
+                    _start=loop_start, _end=time.monotonic())
     finally:
+        pending.clear()
+        CudaOrigImagePredictor.external_orig_imgs = None
         if writer is not None:
             writer.release()
 
@@ -386,6 +357,9 @@ def process_stream(args, mailbox=None, stop_event=None):
     Frames go to `mailbox` for display when one is given, and `stop_event` ends the run early. Returns the
     summary stats dict, including private "_" keys the caller must remove before printing. Raises RuntimeError if
     NVDEC is requested without CUDA or no loop completes. Always closes the reader."""
+    if args.batch_size < 1:
+        raise ValueError("--batch-size must be >= 1")
+    model_shape = validate_model_shape(args.model, args.batch_size, args.imgsz)
     reader = create_reader(args.input, args.decoder, memory_input=True)
     runtime = {"actual": None}
     # Keep JSON history and async timing evidence bounded during --loops 0.
@@ -449,6 +423,8 @@ def process_stream(args, mailbox=None, stop_event=None):
             raise RuntimeError("No loops completed")
         return {
             "instance_id": args.instance_id,
+            "batch_size": args.batch_size,
+            "model_input_shape": model_shape,
             "decoder": reader.backend,
             "memory_bytes": getattr(reader, "encoded_bytes_len", None),
             "memory_input": bool(getattr(reader, "encoded_bytes_len", None) is not None),
@@ -480,6 +456,7 @@ def run_async_gui(args):
     stats as JSON with the display counters added, and re-raises any error from the worker."""
     mailbox = DisplayMailbox()
     stop_event = threading.Event()
+    break_previous = signal.signal(signal.SIGBREAK, lambda *_: stop_event.set()) if hasattr(signal, "SIGBREAK") else None
     done_event = threading.Event()
     result_box = {}
     error_box = {}
@@ -544,6 +521,8 @@ def run_async_gui(args):
         cv2.destroyAllWindows()
         stop_event.set()
         thread.join()
+        if break_previous is not None:
+            signal.signal(signal.SIGBREAK, break_previous)
 
     if "error" in error_box:
         raise error_box["error"]
@@ -587,7 +566,15 @@ def main():
     if not args.model.is_file():
         raise FileNotFoundError(args.model)
     if args.no_display:
-        stats = process_stream(args)
+        stop_event = threading.Event()
+        previous = signal.signal(signal.SIGINT, lambda *_: stop_event.set())
+        break_previous = signal.signal(signal.SIGBREAK, lambda *_: stop_event.set()) if hasattr(signal, "SIGBREAK") else None
+        try:
+            stats = process_stream(args, stop_event=stop_event)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+            if break_previous is not None:
+                signal.signal(signal.SIGBREAK, break_previous)
         stats.pop("_processing_start", None)
         stats.pop("_processing_end", None)
         stats.pop("_processed_times", None)
