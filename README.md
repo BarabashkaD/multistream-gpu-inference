@@ -232,5 +232,8 @@ remains 640×360: padding changes from 140 to 12 rows per side. Other aspect rat
 useful image resolution. Fewer input pixels do not guarantee unchanged accuracy or faster pipeline
 throughput. Compare identical weights/batches separately from batch-size changes.
 
-Validation for this change: CPU/mocked shape, export, geometry and batching contracts. Real
-ONNX export, CUDA/GL parity, tracking accuracy, memory and performance measurements remain pending.
+Validation for this change: CPU/mocked shape, export, geometry and batching contracts, and the GPU
+tests (`python -m pytest -m gpu`), including CUDA/GL parity at 640×640 and 640×384. Headless
+`--pace max` runs with static 640×384 models (batch 1 and 8) track every frame on the CUDA provider,
+and a model whose shape disagrees with `--imgsz` is rejected at start. Tracking accuracy at 640×384
+remains unmeasured.
