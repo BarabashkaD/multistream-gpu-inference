@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+from model_shape import normalize_size, validate_metadata
 from pathlib import Path
 import threading
 import time
@@ -21,7 +22,7 @@ from pipeline.stage import END, Stage, get_until, put_until
 class Detector:
     """Runs the ONNX model on GPU tensors through IO binding, with no host copy."""
 
-    def __init__(self, model_path: Path, gpu_id: int, batch_size: int = 1, size: int = 640):
+    def __init__(self, model_path: Path, gpu_id: int, batch_size: int = 1, size: int | tuple[int, int] = 640):
         """Load the model on the given GPU and read its input and output names, output shape and class names.
 
         Raises RuntimeError if the CUDA execution provider is not active, because a silent CPU fallback would be
@@ -36,9 +37,10 @@ class Detector:
             raise RuntimeError(f"CUDA provider inactive: {self.session.get_providers()}")
         input_info = self.session.get_inputs()[0]
         output_info = self.session.get_outputs()[0]
-        expected = (batch_size, 3, size, size)
+        height, width = normalize_size(size)
+        expected = (batch_size, 3, height, width)
         if tuple(input_info.shape) != expected or input_info.type != "tensor(float)":
-            raise ValueError(f"Expected static FP32 ONNX input {expected}, got {input_info.shape} {input_info.type}; re-export with --batch-size {batch_size}")
+            raise ValueError(f"Expected static FP32 ONNX input {expected}, got {input_info.shape} {input_info.type}; re-export with --batch-size {batch_size} --imgsz {height} {width}")
         if tuple(output_info.shape) != (batch_size, 300, 6) or output_info.type != "tensor(float)":
             raise ValueError(f"Expected static FP32 output {(batch_size, 300, 6)}, got {output_info.shape} {output_info.type}")
         self.batch_size = batch_size
@@ -47,7 +49,9 @@ class Detector:
         output = self.session.get_outputs()[0]
         self.output_name = output.name
         self.output_shape = tuple(output.shape)
-        self.names = ast.literal_eval(self.session.get_modelmeta().custom_metadata_map["names"])
+        metadata = self.session.get_modelmeta().custom_metadata_map
+        validate_metadata(metadata, (height, width), batch_size)
+        self.names = ast.literal_eval(metadata["names"])
         self.binding = self.session.io_binding()
 
     def run(self, input_tensor: torch.Tensor, output_tensor: torch.Tensor) -> None:

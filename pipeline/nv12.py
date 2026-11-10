@@ -11,6 +11,7 @@ import ctypes
 
 import numpy as np
 import torch
+from model_shape import normalize_size
 
 PAD_VALUE = 114.0 / 255.0
 _KDL_CUDA = 2
@@ -70,18 +71,19 @@ def wrap_nv12(pointer: int, width: int, height: int, gpu_id: int = 0) -> torch.T
 
 
 class Letterbox:
-    """Geometry of fitting a source frame into a square detector input, keeping the aspect ratio and padding the rest."""
+    """Geometry of fitting a source frame into a detector input, keeping the aspect ratio and padding the rest."""
 
-    def __init__(self, source_width: int, source_height: int, target: int):
+    def __init__(self, source_width: int, source_height: int, target: int | tuple[int, int]):
         """Compute the scale gain, the resized size and the top and left padding for a target-sized square."""
         self.source_width = source_width
         self.source_height = source_height
-        self.target = target
-        self.gain = min(target / source_height, target / source_width)
+        self.target_height, self.target_width = normalize_size(target)
+        self.target = target  # retained for legacy callers
+        self.gain = min(self.target_height / source_height, self.target_width / source_width)
         self.new_height = max(round(source_height * self.gain), 1)
         self.new_width = max(round(source_width * self.gain), 1)
-        self.top = round((target - self.new_height) / 2 - 0.1)
-        self.left = round((target - self.new_width) / 2 - 0.1)
+        self.top = round((self.target_height - self.new_height) / 2 - 0.1)
+        self.left = round((self.target_width - self.new_width) / 2 - 0.1)
 
     def to_source(self, boxes: np.ndarray) -> np.ndarray:
         """Map x1, y1, x2, y2 boxes from detector input pixels back to source pixels, clipped to the frame.
