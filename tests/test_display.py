@@ -59,7 +59,7 @@ def test_shader_output_matches_cuda_conversion(clip_path):
 
 def nv12_to_input_full(nv12, output):
     """Converts an NV12 frame to RGB at full 1920x1080 size with no letterbox padding, as the reference image."""
-    letterbox = Letterbox(1920, 1080, 1080)
+    letterbox = Letterbox(1920, 1080, (1088, 1920))  # a valid size; the fields below replace its geometry
     letterbox.new_height, letterbox.new_width, letterbox.top, letterbox.left = 1080, 1920, 0, 0
     nv12_to_input(nv12, letterbox, 1920, 1080, output)
 

@@ -14,7 +14,6 @@ from pipeline.nv12 import Letterbox, nv12_to_input, wrap_nv12
 from tests.test_display import first_frame_pointer
 
 pytestmark = pytest.mark.gpu
-TOP, BOTTOM = 140, 500
 
 
 class _Frame:
@@ -54,14 +53,16 @@ def _convert_on_prepare_thread(converter, bundle):
     assert not errors, errors
 
 
-def test_gl_output_matches_the_cuda_conversion(clip_path):
+@pytest.mark.parametrize("size", [(640, 640), (384, 640)])
+def test_gl_output_matches_the_cuda_conversion(clip_path, size):
     """Proves the OpenGL conversion matches the CUDA one to within one level, with padding rows identical and the
     picture the right way up."""
     from pipeline.gl_prepare import GlConverter
 
     pointer, decoder, demuxer = first_frame_pointer(clip_path)
-    letterbox = Letterbox(1920, 1080, 640)
-    expected = torch.empty((1, 3, 640, 640), dtype=torch.float32, device="cuda:0")
+    letterbox = Letterbox(1920, 1080, size)
+    top, bottom = letterbox.top, letterbox.top + letterbox.new_height
+    expected = torch.empty((1, 3, *size), dtype=torch.float32, device="cuda:0")
     actual = torch.empty_like(expected)
     nv12 = wrap_nv12(pointer, 1920, 1080)
     nv12_to_input(nv12, letterbox, 1920, 1080, expected)
@@ -74,10 +75,10 @@ def test_gl_output_matches_the_cuda_conversion(clip_path):
     for channel in range(3):
         assert float(difference[channel].mean()) < 0.05
         assert float(difference[channel].max()) < 1.0
-    for rows in (slice(0, TOP), slice(BOTTOM, 640)):
+    for rows in (slice(0, top), slice(bottom, size[0])):
         assert torch.equal(actual[:, rows], expected[:, rows])
     flipped = (actual.flip(1) - expected).abs()
-    assert float(flipped[:, TOP:BOTTOM].mean()) > 5.0  # the picture is the right way up
+    assert float(flipped[:, top:bottom].mean()) > 5.0  # the picture is the right way up
 
 
 def test_pipeline_runs_with_gl_prepare(clip_path, model_path):

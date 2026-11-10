@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+from model_shape import normalize_size
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MIN_POOL_SIZE = 4
@@ -34,7 +35,7 @@ class PipelineConfig:
     display_size: tuple[int, int] = (1920, 1080)
     conf: float = 0.1
     tracker: str = "bytetrack.yaml"
-    detector_size: int = 640
+    detector_size: tuple[int, int] = (640, 640)
     gpu_id: int = 0
     prepare: str = "cuda"  # "gl" runs frame preparation as an OpenGL shader
     report_interval_s: float = 1.0
@@ -67,6 +68,7 @@ def parse_config(argv: list[str] | None = None) -> PipelineConfig:
     parser.add_argument("--model", type=Path, default=defaults.model)
     parser.add_argument("--loops", type=int, default=defaults.loops, help="1 or N passes, 0 until stopped")
     parser.add_argument("--pool-size", type=int, default=None)
+    parser.add_argument("--imgsz", type=int, nargs="+", default=[640], help="Input size: S or H W (default 640)")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--packet-queue", type=int, default=defaults.packet_queue)
     parser.add_argument("--pace", choices=("realtime", "max"), default=defaults.pace)
@@ -86,6 +88,7 @@ def parse_config(argv: list[str] | None = None) -> PipelineConfig:
         args.pool_size = max(defaults.pool_size, args.batch_size + 2)
     try:
         validate_batch_pool(args.batch_size, args.pool_size)
+        args.imgsz = normalize_size(args.imgsz)
     except ValueError as exc:
         parser.error(str(exc))
     if args.loops < 0:
@@ -104,5 +107,5 @@ def parse_config(argv: list[str] | None = None) -> PipelineConfig:
         max_age_s=args.max_age_s, max_lag_s=args.max_lag_s, display=not args.no_display,
         display_fps=args.display_fps, display_grace_s=args.display_grace_s,
         display_size=args.display_size, conf=args.conf, tracker=args.tracker, gpu_id=args.gpu_id,
-        prepare=args.prepare,
+        prepare=args.prepare, detector_size=args.imgsz,
     )

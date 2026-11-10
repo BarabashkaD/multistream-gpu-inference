@@ -291,6 +291,8 @@ class _FakeStage:
         """Takes the stage name, the failure to report and the shared list the failure is appended to."""
         self.name = name
         self.failure, self.failures = failure, failures
+        self.production_done = threading.Event()  # the decoder's handshake; a fake finishes at once
+        self.production_done.set()
 
     def start(self):
         """Appends the stage's failure, if any, to the shared failure list."""
@@ -309,13 +311,17 @@ class _FakeStage:
 class _FakePool:
     """Stand-in bundle pool with just the calls run_pipeline makes at the end of a run."""
 
+    def __init__(self):
+        """Empty stage queues, drained by run_pipeline at shutdown."""
+        self.to_infer, self.to_detect, self.to_track = queue.Queue(), queue.Queue(), queue.Queue()
+
     def finish(self):
         """Does nothing."""
         pass
 
     def stats(self):
         """Returns an empty pool's statistics."""
-        return {"free": 0, "size": 0}
+        return {"free": 0, "size": 0, "leased": 0}
 
 
 @pytest.fixture
@@ -333,7 +339,7 @@ def pipeline(monkeypatch):
 
     detector = types.SimpleNamespace(output_shape=(1, 1), names={})
     monkeypatch.setattr(app, "MemorySource", Source)
-    monkeypatch.setattr(app, "Detector", lambda model, gpu: detector)
+    monkeypatch.setattr(app, "Detector", lambda model, gpu, batch_size, size: detector)
     monkeypatch.setattr(app, "_build_bundles", lambda config, det: [])
     monkeypatch.setattr(app, "BundlePool", lambda *a, **k: _FakePool())
     monkeypatch.setattr(app, "TrackerCore", lambda *a, **k: None)

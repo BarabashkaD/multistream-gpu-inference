@@ -86,9 +86,9 @@ class GlConverter:
         self.letterbox = letterbox
         self.width, self.height = source_size
         self.gpu_id = gpu_id
-        self.size = letterbox.target
+        self.target_height, self.target_width = letterbox.target_height, letterbox.target_width
         self.frame_bytes = self.width * self.height * 3 // 2
-        self.plane_bytes = self.size * self.size * 4
+        self.plane_bytes = self.target_height * self.target_width * 4
         self.window = None
         self._reset_gl_state()
 
@@ -165,7 +165,7 @@ class GlConverter:
         self.framebuffer = GL.glGenFramebuffers(1)
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.framebuffer)
         for plane in range(_PLANES):
-            target = make_texture(GL.GL_R32F, self.size, self.size, GL.GL_RED, data_type=GL.GL_FLOAT, linear=False)
+            target = make_texture(GL.GL_R32F, self.target_width, self.target_height, GL.GL_RED, data_type=GL.GL_FLOAT, linear=False)
             GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0 + plane, GL.GL_TEXTURE_2D, target, 0)
             self.targets.append(target)
         GL.glDrawBuffers(_PLANES, [GL.GL_COLOR_ATTACHMENT0 + plane for plane in range(_PLANES)])
@@ -209,7 +209,7 @@ class GlConverter:
         GL.glBindBuffer(GL.GL_PIXEL_UNPACK_BUFFER, 0)
         # 3. draw the letterboxed picture over a padding-coloured clear
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.framebuffer)
-        GL.glViewport(0, 0, self.size, self.size)
+        GL.glViewport(0, 0, self.target_width, self.target_height)
         GL.glClearColor(PAD_VALUE, PAD_VALUE, PAD_VALUE, PAD_VALUE)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
         GL.glViewport(self.letterbox.left, self.letterbox.top, self.letterbox.new_width, self.letterbox.new_height)
@@ -226,7 +226,7 @@ class GlConverter:
         GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, self.down_buffer)
         for plane in range(_PLANES):
             GL.glReadBuffer(GL.GL_COLOR_ATTACHMENT0 + plane)
-            GL.glReadPixels(0, 0, self.size, self.size, GL.GL_RED, GL.GL_FLOAT,
+            GL.glReadPixels(0, 0, self.target_width, self.target_height, GL.GL_RED, GL.GL_FLOAT,
                             ctypes.c_void_p(plane * self.plane_bytes))
         GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)

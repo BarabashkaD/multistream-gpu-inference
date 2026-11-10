@@ -208,3 +208,32 @@ CPU contracts: `python -m pytest tests/test_temporal_batch.py tests/test_config.
 padding, tails, loop isolation, cancellation, export failure preservation and
 shutdown handshakes using fake inference. Real ONNX export/inference, GPU memory,
 GL/display and performance/quality comparisons still require hardware validation.
+
+### Select detector input shape
+
+`run_pipeline.py --imgsz 640` (the default) keeps the original 640×640 input.
+`--imgsz 384 640` selects 640×384; two values are **height width**, not width height.
+Sizes must be positive multiples of 32. Source aspect ratio is preserved with letterbox padding;
+GUI/source coordinates are unchanged. This is a startup option, not runtime reshaping.
+
+```powershell
+python prepare_model.py --imgsz 384 640 --batch-size 4
+python run_pipeline.py --model yolo26n-640x384-b4.onnx --imgsz 384 640 --batch-size 4 --no-display --pace max
+```
+
+Each static model is specific to its shape and batch. Square names remain `yolo26n.onnx`
+and `yolo26n-b4.onnx`; rectangular names include width×height. Export validates the isolated
+temporary file before replacing that exact variant. Runtime rejects mismatched graph dimensions
+and contradictory batch/size metadata. Legacy missing metadata is accepted because v2 binds
+directly to the validated ONNX graph, not an Ultralytics predictor.
+
+Both CUDA and opt-in OpenGL preparation use the selected canvas. For 1080p video the picture
+remains 640×360: padding changes from 140 to 12 rows per side. Other aspect ratios may reduce
+useful image resolution. Fewer input pixels do not guarantee unchanged accuracy or faster pipeline
+throughput. Compare identical weights/batches separately from batch-size changes.
+
+Validation for this change: CPU/mocked shape, export, geometry and batching contracts, and the GPU
+tests (`python -m pytest -m gpu`), including CUDA/GL parity at 640×640 and 640×384. Headless
+`--pace max` runs with static 640×384 models (batch 1 and 8) track every frame on the CUDA provider,
+and a model whose shape disagrees with `--imgsz` is rejected at start. Tracking accuracy at 640×384
+remains unmeasured.
