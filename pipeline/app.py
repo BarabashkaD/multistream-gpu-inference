@@ -13,6 +13,7 @@ import torch
 from pipeline.bundle import Bundle, BundlePool
 from pipeline.config import PipelineConfig, validate_batch_pool
 from pipeline.decoder import DecoderStage
+from model_shape import normalize_size
 from pipeline.detector import Detector, InferenceStage
 from pipeline.metrics import Metrics
 from pipeline.nv12 import Letterbox
@@ -38,9 +39,9 @@ def _join_stages(stages, timeout_s: float) -> None:
 def _build_bundles(config: PipelineConfig, detector: Detector) -> list[Bundle]:
     """Create the fixed set of bundles, each with a float32 input tensor and a detection tensor on the GPU."""
     device = f"cuda:{config.gpu_id}"
-    size = config.detector_size
+    height, width = normalize_size(config.detector_size)
     return [Bundle(index,
-                   torch.empty((1, 3, size, size), dtype=torch.float32, device=device),
+                   torch.empty((1, 3, height, width), dtype=torch.float32, device=device),
                    torch.empty((1, *detector.output_shape[1:]), dtype=torch.float32, device=device))
             for index in range(config.pool_size)]
 
@@ -143,6 +144,8 @@ def run_pipeline(config: PipelineConfig) -> dict:
     snapshot = metrics.snapshot()
     snapshot["pool"] = pool.stats()
     snapshot["batch_size"] = config.batch_size
+    snapshot["input_height"], snapshot["input_width"] = normalize_size(config.detector_size)
+    snapshot["providers"] = detector.session.get_providers()
     return snapshot
 
 
