@@ -144,12 +144,13 @@ class NvdecReader:
             return True, None, timestamp
         return True, self.host_frame(), timestamp
 
-    def host_frame(self) -> np.ndarray:
+    def host_frame(self, device_frame=None) -> np.ndarray:
         """Copies the last decoded frame to host memory as a contiguous BGR array. Raises RuntimeError if no frame
         has been read yet."""
-        if self.last_device_frame is None:
+        source = self.last_device_frame if device_frame is None else device_frame
+        if source is None:
             raise RuntimeError("host_frame() called before read()")
-        bgr = self.last_device_frame.flip(-1).cpu().numpy()
+        bgr = source.flip(-1).cpu().numpy()
         return bgr if bgr.flags.c_contiguous else np.ascontiguousarray(bgr)
 
     def reset(self) -> None:

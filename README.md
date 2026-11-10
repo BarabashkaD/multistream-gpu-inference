@@ -139,3 +139,62 @@ The test clip is Pexels video 36304379, "Busy urban intersection from above", su
 Copyright (C) 2026 Dmitry Veremeev
 
 To cite this software, use [CITATION.cff](CITATION.cff).
+
+## Temporal batching (v1)
+
+`--batch-size N` (default **1**) groups successive frames of **one video stream**
+into one inference. Each process still owns its own model. ByteTrack advances once
+per real frame, in order, and persists between batches; it resets between loops.
+The square 640x640 input and existing confidence settings are unchanged.
+
+Export a matching static model, then select it explicitly:
+
+```powershell
+python prepare_model.py --model yolo26n.pt --batch-size 4
+python run_demo.py --input data/pexels-36304379.mp4 --model yolo26n-b4.onnx --batch-size 4 --no-display
+python launch_instances.py --instances 2 --model yolo26n-b4.onnx --batch-size 4 --headless
+```
+
+The PowerShell launchers forward `--batch-size` unchanged. N must be positive.
+A model/input shape mismatch fails before processing instead of silently splitting
+one requested batch into multiple batch-1 calls. Non-default exports use a separate
+`-bN.onnx` file and do not overwrite the batch-1 model. Dynamic models are not supported.
+
+EOF, max-frames and graceful stop flush the real partial batch before resetting the
+tracker. Ultralytics **8.4.190** pads the static model input internally and removes
+padding outputs before tracking. No artificial frames are recorded or counted.
+Ctrl-C (and launcher Ctrl-Break on Windows) requests a graceful stop in headless mode;
+an exception or forced process termination does not guarantee a flush.
+
+Files are still decoded as fast as possible; no artificial sleep or new realtime
+pacing is introduced. For a genuinely 25 FPS source, batch 8 would add up to 280 ms
+of accumulation wait (140 ms on average), plus processing. This is not a measurement
+of file/max-pace latency. Larger batches also require more GPU memory and can make
+multi-process scaling worse. Batching concatenates prepared GPU tensors; it is not
+a zero-copy change.
+
+MP4 recording includes every real processed frame in order at the source FPS.
+The existing newest-frame GUI mailbox may skip more displayed frames when results
+arrive in bursts; this does not mean inference skipped frames.
+
+JSON reports `batch_size`, `model_input_shape`, per-loop `frames_read`,
+`frames_processed`, `frames_written`, `inference_batches`, `batch_sizes`,
+`batch_fill_wait_ms`, and `read_to_batch_complete_ms` p50/p95. The latter ends when
+all tracking callbacks in that batch finish, not each individual tracker update.
+Latency statistics retain the last 4096 frames per loop; initial model warmup is
+included. `inference_batches` counts application calls, excluding model warmup.
+
+Run tests with the environment from requirements.txt:
+
+```powershell
+python -m unittest discover -s tests -v
+$env:V1_BATCH_MODEL = 'C:\absolute\path\yolo26n-b4.onnx'
+$env:V1_BATCH_CLIP = 'C:\absolute\path\clip.mp4'
+$env:V1_BATCH_SIZE = '4'
+python -m unittest discover -s tests -p test_real_batch_contract.py -v
+```
+
+The opt-in GPU test instruments actual ONNX Runtime calls and tracker updates,
+including a partial tail and a second loop. Benchmark speed separately using equal
+clip/confidence/warmup/loop settings and multiple repeats; unit tests do not prove
+throughput gains or detection accuracy equivalence.
