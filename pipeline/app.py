@@ -11,13 +11,14 @@ import threading
 import torch
 
 from pipeline.bundle import Bundle, BundlePool
-from pipeline.config import PipelineConfig
+from pipeline.config import PipelineConfig, validate_batch_pool
 from pipeline.decoder import DecoderStage
 from pipeline.detector import Detector, InferenceStage
 from pipeline.metrics import Metrics
 from pipeline.nv12 import Letterbox
 from pipeline.prepare import CudaConverter, PrepareStage
 from pipeline.source import MemorySource, ReaderStage
+from pipeline.stage import END
 from pipeline.tracking import TrackerCore, TrackerStage
 
 _JOIN_TIMEOUT_S = 5.0
@@ -40,7 +41,7 @@ def _build_bundles(config: PipelineConfig, detector: Detector) -> list[Bundle]:
     size = config.detector_size
     return [Bundle(index,
                    torch.empty((1, 3, size, size), dtype=torch.float32, device=device),
-                   torch.empty(detector.output_shape, dtype=torch.float32, device=device))
+                   torch.empty((1, *detector.output_shape[1:]), dtype=torch.float32, device=device))
             for index in range(config.pool_size)]
 
 
@@ -66,12 +67,13 @@ def run_pipeline(config: PipelineConfig) -> dict:
     teardown errors are reported the same way and never replace a stage failure. The snapshot includes the pool's
     statistics under "pool".
     """
+    validate_batch_pool(config.batch_size, config.pool_size)
     stop, finished = threading.Event(), threading.Event()
     failures: list = []
     source = MemorySource(config.input)
     source_size = (source.width, source.height)
     letterbox = Letterbox(source.width, source.height, config.detector_size)
-    detector = Detector(config.model, config.gpu_id)
+    detector = Detector(config.model, config.gpu_id, config.batch_size, config.detector_size)
     returned: queue.SimpleQueue = queue.SimpleQueue()
     pool = BundlePool(_build_bundles(config, detector), returned.put,
                       display_enabled=config.display, max_age_s=config.max_age_s,
@@ -84,9 +86,11 @@ def run_pipeline(config: PipelineConfig) -> dict:
         ReaderStage(source, packets, config, metrics, stop, failures),
         DecoderStage(source, packets, pool, returned, config, metrics, stop, failures),
         PrepareStage(converter, pool, config, metrics, stop, failures),
-        InferenceStage(detector, pool, metrics, stop, failures),
+        InferenceStage(detector, pool, metrics, stop, failures, config.batch_size),
         TrackerStage(core, pool, finished, metrics, stop, failures),
     ]
+    cleanup_done = threading.Event()
+    stages[1].cleanup_done = cleanup_done
     reporting_done = threading.Event()
     reporter = threading.Thread(target=_report, args=(metrics, pool, config.report_interval_s, reporting_done),
                                 name="reporter", daemon=True)
@@ -105,8 +109,26 @@ def run_pipeline(config: PipelineConfig) -> dict:
                 stop.set()
             pool.finish()  # before the joins, so the decoder thread can unlock every frame
             try:
-                _join_stages(stages, _JOIN_TIMEOUT_S)
+                # The decoder owns UnlockFrame and must outlive every consumer/queue lease.
+                consumers = [stage for stage in stages if stage is not stages[1]]
+                _join_stages(consumers, _JOIN_TIMEOUT_S)
+                if not stages[1].production_done.wait(_JOIN_TIMEOUT_S):
+                    raise RuntimeError("decoder did not finish production")
+                for pending_queue in (pool.to_infer, pool.to_detect, pool.to_track):
+                    while True:
+                        try:
+                            pending = pending_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if pending is not END:
+                            pool.abandon(pending)
+                            metrics.count("queued_cancelled")
+                if pool.stats()["leased"]:
+                    raise RuntimeError("GPU work or stage still owns bundles; retaining decoder")
+                cleanup_done.set()
+                _join_stages([stages[1]], _JOIN_TIMEOUT_S)
             except RuntimeError:
+                _stuck_stages.extend(stages)  # retain decoder and every outstanding GPU owner
                 if not failures:
                     raise
     finally:
@@ -120,6 +142,7 @@ def run_pipeline(config: PipelineConfig) -> dict:
         raise RuntimeError(f"stage {name} failed: {error}") from error
     snapshot = metrics.snapshot()
     snapshot["pool"] = pool.stats()
+    snapshot["batch_size"] = config.batch_size
     return snapshot
 
 

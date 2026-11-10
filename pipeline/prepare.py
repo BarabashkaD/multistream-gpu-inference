@@ -88,11 +88,17 @@ class PrepareStage(Stage):
                 self.pool.abandon(bundle)
                 self.metrics.count("dropped")
                 continue
-            started = time.perf_counter()
-            self.converter.convert(bundle)
-            self.metrics.record_ms("prepare", (time.perf_counter() - started) * 1e3)
-            self.pool.mark(bundle, Part.INPUT)
-            self.pool.to_detect.put(bundle)  # the lease moves with the bundle
+            try:
+                started = time.perf_counter()
+                self.converter.convert(bundle)
+                self.metrics.record_ms("prepare", (time.perf_counter() - started) * 1e3)
+                self.pool.mark(bundle, Part.INPUT)
+                self.pool.to_detect.put(bundle)  # the lease moves with the bundle
+            except BaseException:
+                if bundle.input_tensor.is_cuda:
+                    torch.cuda.current_stream(bundle.input_tensor.device).synchronize()
+                self.pool.abandon(bundle)
+                raise
 
     def _too_old(self, bundle) -> bool:
         """Whether the oldest-first drop policy is on and the frame is further behind its source time than allowed."""

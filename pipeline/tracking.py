@@ -82,12 +82,19 @@ class TrackerStage(Stage):
             if bundle is END:
                 self.finished.set()
                 return
-            if current_loop is not None and bundle.loop != current_loop:
-                self.core.reset()
-            current_loop = bundle.loop
-            started = time.perf_counter()
-            tracks = self.core.update(bundle.detections[0].cpu().numpy())
-            self.metrics.record_ms("track", (time.perf_counter() - started) * 1e3)
-            self.pool.set_tracks(bundle, tracks)
-            self.metrics.count("tracked")
-            self.pool.release(bundle)
+            try:
+                if current_loop is not None and bundle.loop != current_loop:
+                    self.core.reset()
+                current_loop = bundle.loop
+                started = time.perf_counter()
+                tracks = self.core.update(bundle.detections[0].cpu().numpy())
+                self.metrics.record_ms("track", (time.perf_counter() - started) * 1e3)
+                self.pool.set_tracks(bundle, tracks)
+                self.metrics.record_ms("published_to_tracked", (time.monotonic() - bundle.published_at) * 1e3)
+                self.metrics.record_ms("due_to_tracked", (time.monotonic() - bundle.due_at) * 1e3)
+                self.metrics.count("tracked")
+            except BaseException:
+                self.pool.abandon(bundle)
+                raise
+            else:
+                self.pool.release(bundle)

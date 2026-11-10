@@ -37,6 +37,8 @@ class DecoderStage(Stage):
         self.started_at = 0.0
         self.decoder = None  # kept on the stage so it outlives every view of its memory
         self.locked = 0
+        self.cleanup_done: threading.Event | None = None
+        self.production_done = threading.Event()
 
     def work(self) -> None:
         """Create the decoder on the configured GPU and decode until the stream ends or the stage is stopped.
@@ -44,14 +46,21 @@ class DecoderStage(Stage):
         Output stays in device memory in the native NV12 layout. Frames that already came back are unlocked on
         every exit path.
         """
-        self.decoder = nvc.CreateDecoder(gpuid=self.config.gpu_id, codec=self.source.codec, usedevicememory=True,
-                                         outputColorType=nvc.OutputColorType.NATIVE)
-        self.started_at = time.monotonic()
         try:
+            self.decoder = nvc.CreateDecoder(gpuid=self.config.gpu_id, codec=self.source.codec, usedevicememory=True,
+                                             outputColorType=nvc.OutputColorType.NATIVE)
+            self.started_at = time.monotonic()
             self._decode_packets()
+        except BaseException:
+            self.stop_event.set()  # visible before waiting for consumer cleanup
+            raise
         finally:
+            self.production_done.set()
             # A stop or failure must not strand frames that already came back. Frames still held
             # elsewhere stay locked until this stage is dropped, which happens when run_pipeline returns.
+            if self.cleanup_done is not None:
+                while not self.cleanup_done.wait(0.005):
+                    self._unlock_returned()
             self._unlock_returned()
 
     def _decode_packets(self) -> None:
@@ -67,6 +76,7 @@ class DecoderStage(Stage):
             if item is END:
                 self._emit(nvc.PacketData())
                 put_until(self.pool.to_infer, END, self.stop_event)
+                self.production_done.set()
                 self._drain()
                 return
             heapq.heappush(self.pending, (item.loop, item.packet.pts))
@@ -82,19 +92,29 @@ class DecoderStage(Stage):
         count = self.decoder.GetNumDecodedFrame(packet)
         self.metrics.record_ms("decode", (time.perf_counter() - started) * 1e3)
         for _ in range(count):
+            if self.stop_event.is_set():
+                return
             bundle = self.pool.acquire(self.stop_event)
             if bundle is None:
                 return
-            self._unlock_returned()
-            started = time.perf_counter()
-            pointer = self.decoder.GetLockedFrame()
-            self.locked += 1
-            self.decoder.SyncOnCUStream()
-            self.metrics.record_ms("lock", (time.perf_counter() - started) * 1e3)
-            loop, pts = heapq.heappop(self.pending)
-            due = self.started_at + self.frame_id / self.source.fps
-            self._pace(due)
-            nv12 = wrap_nv12(pointer, self.source.width, self.source.height, self.config.gpu_id)
+            pointer = None
+            try:
+                self._unlock_returned()
+                started = time.perf_counter()
+                pointer = self.decoder.GetLockedFrame()
+                self.locked += 1
+                self.decoder.SyncOnCUStream()
+                self.metrics.record_ms("lock", (time.perf_counter() - started) * 1e3)
+                loop, pts = heapq.heappop(self.pending)
+                due = self.started_at + self.frame_id / self.source.fps
+                self._pace(due)
+                nv12 = wrap_nv12(pointer, self.source.width, self.source.height, self.config.gpu_id)
+            except BaseException:
+                if pointer is not None:
+                    self.decoder.UnlockFrame(pointer)
+                    self.locked -= 1
+                self.pool.cancel_acquired(bundle)
+                raise
             self.pool.publish_frame(bundle, pointer, nv12, self.frame_id, loop, pts, due_at=due)
             self.frame_id += 1
             self.metrics.count("decoded")
