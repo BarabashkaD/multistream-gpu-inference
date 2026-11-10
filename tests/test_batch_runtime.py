@@ -18,14 +18,15 @@ class Reader:
         return True,np.full((12,16,3),self.i,dtype=np.uint8),self.i/25
 
 class Model:
-    def __init__(self): self.calls=[]; self.ids=[]
+    def __init__(self): self.calls=[]; self.ids=[]; self.options=[]
     def track(self, source, **kwargs):
+        self.options.append(kwargs)
         frames=source if isinstance(source,list) else [source]
         self.calls.append(len(frames)); self.ids.extend(int(f[0,0,0]) for f in frames)
         return [SimpleNamespace(boxes=None,names={}) for f in frames]
 
 class BatchingTests(unittest.TestCase):
-    def run_case(self,n,b,max_frames=0,stop=None,writer=False):
+    def run_case(self,n,b,max_frames=0,stop=None,writer=False,imgsz=640):
         args=SimpleNamespace(batch_size=b,tracker='bytetrack.yaml',conf=.25,iou=.7,max_frames=max_frames)
         model=Model(); reader=Reader(n,stop)
         from pathlib import Path
@@ -36,7 +37,7 @@ class BatchingTests(unittest.TestCase):
             def release(self): pass
         w=Writer()
         with patch.object(demo.cv2,'VideoWriter',return_value=w), patch.object(demo,'annotate',side_effect=lambda f,*a,**k:f):
-            stats=demo.run_one_loop(args,reader,model,'cpu',640,1,Path('results/test.mp4') if writer else None,None,stop,{'actual':None})
+            stats=demo.run_one_loop(args,reader,model,'cpu',imgsz,1,Path('results/test.mp4') if writer else None,None,stop,{'actual':None})
         return stats,model,w
     def test_sizes_tails_and_order(self):
         for b in [1,2,4,8,16]:
@@ -48,6 +49,13 @@ class BatchingTests(unittest.TestCase):
                     self.assertEqual(m.ids,list(range(1,n+1)))
                     self.assertEqual(w.frames,list(range(1,n+1)))
                     self.assertEqual(s['frames_written'],n)
+    def test_rectangular_batches(self):
+        for b in (1,2,4,8,16):
+            for n in (1,max(1,b-1),b,b+1):
+                s,m,w=self.run_case(n,b,writer=True,imgsz=(384,640))
+                self.assertEqual(m.ids,list(range(1,n+1)))
+                self.assertEqual(w.frames,m.ids)
+                self.assertTrue(all(o['imgsz']==(384,640) and o['rect'] is False for o in m.options))
     def test_max_frames_tail(self):
         s,m,_=self.run_case(12,4,max_frames=5)
         self.assertEqual(m.calls,[4,1]); self.assertEqual(s['frames_read'],5)
@@ -64,7 +72,9 @@ class BatchingTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             p=Path(temp)/'m.onnx'
             x=helper.make_tensor_value_info('x',TensorProto.FLOAT,[4,3,640,640])
-            onnx.save(helper.make_model(helper.make_graph([], 'shape', [x], [x])),p)
+            model=helper.make_model(helper.make_graph([], 'shape', [x], [x]))
+            helper.set_model_props(model, {'batch':'4', 'imgsz':'[640,640]'})
+            onnx.save(model,p)
             self.assertEqual(demo.validate_model_shape(p,4,640),[4,3,640,640])
             with self.assertRaises(ValueError): demo.validate_model_shape(p,1,640)
 

@@ -14,6 +14,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+from input_shape import letterbox_geometry
 
 
 class ShapeOnlyImage:
@@ -162,9 +163,9 @@ class NvdecReader:
         self.index = 0
         self.last_device_frame = None
 
-    def cuda_input(self, target_size: int) -> tuple["object", dict[str, int | float]]:
+    def cuda_input(self, target_size: int | tuple[int, int]) -> tuple["object", dict[str, int | float]]:
         """Builds the detector input from the last decoded frame on the GPU: a float32 RGB tensor of shape
-        (1, 3, target_size, target_size) scaled to 0..1, letterboxed with grey (114/255) padding. Returns it with
+        (1, 3, target_h, target_w) scaled to 0..1, letterboxed with grey (114/255) padding. Returns it with
         a dict of the original and resized sizes, padding and ratio. Raises RuntimeError if no frame has been read
         or the frame is not a uint8 CUDA tensor."""
         if self.last_device_frame is None:
@@ -175,14 +176,10 @@ class NvdecReader:
             raise RuntimeError(f"Unexpected NVDEC dtype: {self.last_device_frame.dtype}")
 
         h, w = self.last_device_frame.shape[:2]
-        target_h = target_w = int(target_size)
-        ratio = min(target_h / h, target_w / w)
-        new_w = max(round(w * ratio), 1)
-        new_h = max(round(h * ratio), 1)
-        dw = target_w - new_w
-        dh = target_h - new_h
-        left = round(dw / 2 - 0.1)
-        top = round(dh / 2 - 0.1)
+        geometry = letterbox_geometry(int(h), int(w), target_size)
+        target_h, target_w = geometry['target_h'], geometry['target_w']
+        new_h, new_w = geometry['new_h'], geometry['new_w']
+        top, left = geometry['pad_top'], geometry['pad_left']
 
         chw = self.last_device_frame.permute(2, 0, 1).unsqueeze(0).contiguous()
         chw = chw.to(dtype=self._torch.float32).div_(255.0)
@@ -196,16 +193,7 @@ class NvdecReader:
             device=self.last_device_frame.device,
         )
         output[..., top : top + new_h, left : left + new_w] = resized
-        return output.contiguous(), {
-            "orig_h": int(h),
-            "orig_w": int(w),
-            "new_h": int(new_h),
-            "new_w": int(new_w),
-            "pad_left": int(left),
-            "pad_top": int(top),
-            "target": int(target_size),
-            "ratio": float(ratio),
-        }
+        return output.contiguous(), geometry
 
     def close(self) -> None:
         """Releases the decoder and the last frame and collects garbage so GPU memory is freed. Safe to call twice
