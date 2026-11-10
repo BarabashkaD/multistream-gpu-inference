@@ -22,7 +22,8 @@ class RealBatchContract(unittest.TestCase):
             calls.append(1); return run(session,*a,**kw)
         def record_update(tracker,*a,**kw):
             updates.append((id(tracker),tracker.frame_id)); return update(tracker,*a,**kw)
-        args=SimpleNamespace(batch_size=size,imgsz=640,input=Path(os.environ['V1_BATCH_CLIP']),
+        imgsz=tuple(map(int,os.getenv('V1_BATCH_IMGSZ','640 640').split()))
+        args=SimpleNamespace(batch_size=size,imgsz=imgsz,input=Path(os.environ['V1_BATCH_CLIP']),
              model=Path(os.environ['V1_BATCH_MODEL']),decoder='nvdec',backend='cuda',loops=2,
              max_frames=size*2+1,tracker='bytetrack.yaml',conf=.25,iou=.7,output=None,instance_id='contract')
         with patch.object(ort.InferenceSession,'run_with_iobinding',record_run), patch.object(BYTETracker,'update',record_update):
