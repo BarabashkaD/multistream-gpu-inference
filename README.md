@@ -161,3 +161,50 @@ The test clip is Pexels video 36304379, "Busy urban intersection from above", su
 Copyright (C) 2026 Dmitry Veremeev
 
 To cite this software, use [CITATION.cff](CITATION.cff).
+
+### Temporal batching (v2)
+
+`run_pipeline.py --batch-size N` groups consecutive prepared frames from **one**
+video stream into a single inference call. The default is 1 (the original direct
+per-frame path). Each process still owns its model; this is not v3's shared server.
+
+Export and run a square batch-4 model:
+
+```sh
+python prepare_model.py --batch-size 4
+python run_pipeline.py --model yolo26n-b4.onnx --batch-size 4 --pace max --no-display
+```
+
+The model must have static FP32 input `[N,3,640,640]` and output `[N,300,6]`.
+Batch-1 keeps `yolo26n.onnx`; other batches use `yolo26n-bN.onnx`. Export is
+isolated and validated before replacing its destination. GPU staging/scatter
+copies are used for N>1; this is not a zero-copy batching operation.
+
+The default pool is `max(16, N+2)`; an explicit `--pool-size` must be at least
+`max(4, N+2)`. Programmatic PipelineConfig callers must set a sufficient pool.
+A partial batch at EOF or a loop boundary duplicates its last real frame. Only
+real results go to the single ordered tracker. Padding never advances tracking
+or counts as a processed frame. Loops are never mixed in one batch.
+
+EOF drains normally. Q/Esc/Ctrl-C and stage errors keep v2's **abort** semantics:
+pending batches/queues are cancelled, counted separately, and leases are released
+before the decoder exits. They are not promised a final inference. A GPU failure
+whose completion cannot be established retains its owners rather than reusing
+possibly active memory. A stuck-stage error requires terminating the process.
+
+At 25 FPS real-time pacing, the first frame of batch 4 may wait 120 ms just to
+fill the batch (batch 8: 280 ms). No artificial sleep is added. Display still uses
+the latest available frame and can show old tracks after its grace period; larger
+batches can increase mismatched/omitted displays. No MP4 recording is added.
+
+Final JSON reports `batch_size`, pool size, `inference_calls`, full/partial batches,
+padding slots, batch-size counters, cancellations, and median/p95 timings for
+batch fill, inference call, per-real-frame inference cost, and published/due-to-tracked.
+Timings retain the latest 1024 samples; they are not full-run quantiles. `infer`
+now measures an entire call (including staging/scatter), not a single frame.
+Max-speed file latency is not live-source accumulation latency.
+
+CPU contracts: `python -m pytest tests/test_temporal_batch.py tests/test_config.py tests/test_bundle_pool.py tests/test_stage_metrics.py`. These cover duplicate
+padding, tails, loop isolation, cancellation, export failure preservation and
+shutdown handshakes using fake inference. Real ONNX export/inference, GPU memory,
+GL/display and performance/quality comparisons still require hardware validation.

@@ -119,6 +119,15 @@ class BundlePool:
             bundle.abandoned = False
             return bundle
 
+    def cancel_acquired(self, bundle: Bundle) -> None:
+        """Return a decoder reservation that was never published (no GPU consumer exists)."""
+        with self._condition:
+            if bundle.parts != Part.NONE or bundle.leases != 1:
+                raise RuntimeError("only an unpublished decoder reservation may be cancelled")
+            bundle.leases = 0
+            self._free.append(bundle)
+            self._condition.notify_all()
+
     def publish_frame(self, bundle: Bundle, pointer: int, nv12: Any, frame_id: int, loop: int, pts: int,
                       due_at: float | None = None) -> None:
         """Record the decoded frame in the bundle, make it visible to display and queue it for preparation.

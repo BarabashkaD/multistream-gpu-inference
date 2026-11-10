@@ -66,5 +66,6 @@ class Metrics:
             "counts": counts,
             "fps": {name: value / elapsed for name, value in counts.items()},
             "steady_fps": steady,  # first to last event, so start-up and shutdown are excluded
+            "p95_ms": {name: sorted(values)[min(len(values)-1, int(0.95 * len(values)))] for name, values in timings.items() if values},
             "median_ms": {name: statistics.median(values) for name, values in timings.items() if values},
         }

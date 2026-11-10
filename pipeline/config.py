@@ -22,6 +22,7 @@ class PipelineConfig:
     model: Path = REPO_ROOT / "yolo26n.onnx"
     loops: int = 1  # 0 repeats until stopped
     pool_size: int = 16
+    batch_size: int = 1
     packet_queue: int = 64
     pace: str = "realtime"
     drop_policy: str = "none"
@@ -37,6 +38,14 @@ class PipelineConfig:
     gpu_id: int = 0
     prepare: str = "cuda"  # "gl" runs frame preparation as an OpenGL shader
     report_interval_s: float = 1.0
+
+
+def validate_batch_pool(batch_size: int, pool_size: int) -> None:
+    """Reject configurations that cannot fill a batch while keeping decoder progress possible."""
+    if batch_size < 1:
+        raise ValueError("batch size must be at least 1")
+    if pool_size < max(MIN_POOL_SIZE, batch_size + 2):
+        raise ValueError(f"pool size must be at least {max(MIN_POOL_SIZE, batch_size + 2)} for batch {batch_size}")
 
 
 def _size(text: str) -> tuple[int, int]:
@@ -57,7 +66,8 @@ def parse_config(argv: list[str] | None = None) -> PipelineConfig:
     parser.add_argument("--input", type=Path, default=defaults.input)
     parser.add_argument("--model", type=Path, default=defaults.model)
     parser.add_argument("--loops", type=int, default=defaults.loops, help="1 or N passes, 0 until stopped")
-    parser.add_argument("--pool-size", type=int, default=defaults.pool_size)
+    parser.add_argument("--pool-size", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--packet-queue", type=int, default=defaults.packet_queue)
     parser.add_argument("--pace", choices=("realtime", "max"), default=defaults.pace)
     parser.add_argument("--drop-policy", choices=("none", "oldest"), default=defaults.drop_policy)
@@ -72,8 +82,12 @@ def parse_config(argv: list[str] | None = None) -> PipelineConfig:
     parser.add_argument("--gpu-id", type=int, default=defaults.gpu_id)
     parser.add_argument("--prepare", choices=("cuda", "gl"), default=defaults.prepare)
     args = parser.parse_args(argv)
-    if args.pool_size < MIN_POOL_SIZE:
-        parser.error(f"--pool-size must be at least {MIN_POOL_SIZE}")
+    if args.pool_size is None:
+        args.pool_size = max(defaults.pool_size, args.batch_size + 2)
+    try:
+        validate_batch_pool(args.batch_size, args.pool_size)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.loops < 0:
         parser.error("--loops must be 0 or more")
     if args.packet_queue < 1:
@@ -86,7 +100,7 @@ def parse_config(argv: list[str] | None = None) -> PipelineConfig:
         parser.error("--prepare gl cannot choose a GPU; use --gpu-id 0")
     return PipelineConfig(
         input=args.input, model=args.model, loops=args.loops, pool_size=args.pool_size,
-        packet_queue=args.packet_queue, pace=args.pace, drop_policy=args.drop_policy,
+        batch_size=args.batch_size, packet_queue=args.packet_queue, pace=args.pace, drop_policy=args.drop_policy,
         max_age_s=args.max_age_s, max_lag_s=args.max_lag_s, display=not args.no_display,
         display_fps=args.display_fps, display_grace_s=args.display_grace_s,
         display_size=args.display_size, conf=args.conf, tracker=args.tracker, gpu_id=args.gpu_id,

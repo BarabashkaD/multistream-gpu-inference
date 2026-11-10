@@ -2,16 +2,68 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Dmitry Veremeev
 # Additional terms under AGPL-3.0 section 7 apply: see NOTICE.
-"""Export a YOLO checkpoint to a static-shape ONNX file and print a JSON summary of the result.
-
-Takes --model (default yolo26n.pt, downloaded by Ultralytics if absent), --imgsz and --opset. Exports on the CPU
-without NMS, simplification or dynamic axes, so the ONNX runtime loop can run the tracker itself. Writes the .onnx
-file next to the checkpoint and uses .ultralytics in this folder as the Ultralytics config directory.
-"""
-import argparse,json,os
+"""Export a separate static square ONNX model for each temporal batch size."""
+import argparse
+import json
+import os
 from pathlib import Path
-os.environ["YOLO_CONFIG_DIR"] = str(Path(__file__).resolve().parent / ".ultralytics")
-from ultralytics import YOLO
-p=argparse.ArgumentParser(); p.add_argument("--model",default="yolo26n.pt"); p.add_argument("--imgsz",type=int,default=640); p.add_argument("--opset",type=int,default=12); a=p.parse_args()
-m=YOLO(a.model); out=m.export(format="onnx",imgsz=a.imgsz,opset=a.opset,dynamic=False,simplify=False,nms=False,device="cpu")
-print(json.dumps({"checkpoint":a.model,"onnx":str(Path(str(out)).resolve()),"imgsz":a.imgsz,"opset":a.opset},indent=2))
+import shutil
+import tempfile
+
+os.environ['YOLO_CONFIG_DIR'] = str(Path(__file__).resolve().parent / '.ultralytics')
+
+
+def positive_int(value):
+    value = int(value)
+    if value < 1:
+        raise argparse.ArgumentTypeError('must be at least 1')
+    return value
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--model', default='yolo26n.pt')
+    parser.add_argument('--imgsz', type=positive_int, default=640)
+    parser.add_argument('--opset', type=positive_int, default=12)
+    parser.add_argument('--batch-size', type=positive_int, default=1)
+    return parser.parse_args(argv)
+
+
+def export_model(args, model_factory=None, validator=None):
+    if model_factory is None:
+        from ultralytics import YOLO
+        model_factory = YOLO
+    if validator is None:
+        validator = validate_export
+    model = model_factory(args.model)
+    checkpoint = Path(model.ckpt_path).resolve()
+    suffix = '' if args.batch_size == 1 else f'-b{args.batch_size}'
+    output = checkpoint.with_name(checkpoint.stem + suffix + '.onnx')
+    with tempfile.TemporaryDirectory(prefix='.batch-export-', dir=checkpoint.parent) as directory:
+        temporary = Path(directory) / checkpoint.name
+        shutil.copy2(checkpoint, temporary)
+        exported = Path(str(model_factory(str(temporary)).export(
+            format='onnx', imgsz=args.imgsz, opset=args.opset, batch=args.batch_size,
+            dynamic=False, simplify=False, nms=False, device='cpu'))).resolve()
+        if exported.parent != Path(directory).resolve():
+            raise RuntimeError('Exporter wrote outside its isolated directory')
+        validator(exported, args.batch_size, args.imgsz)
+        exported.replace(output)
+    return {'checkpoint': str(checkpoint), 'onnx': str(output), 'imgsz': args.imgsz,
+            'batch_size': args.batch_size, 'opset': args.opset}
+
+
+def validate_export(path, batch, size):
+    import onnx
+    model = onnx.load(str(path))
+    onnx.checker.check_model(model)
+    for node, shape in ((model.graph.input[0], (batch, 3, size, size)),
+                        (model.graph.output[0], (batch, 300, 6))):
+        tensor = node.type.tensor_type
+        actual = tuple(d.dim_value for d in tensor.shape.dim)
+        if actual != shape or tensor.elem_type != onnx.TensorProto.FLOAT:
+            raise ValueError(f'Expected static FP32 {shape}; got {actual}')
+
+
+if __name__ == '__main__':
+    print(json.dumps(export_model(parse_args()), indent=2))
