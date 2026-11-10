@@ -32,7 +32,9 @@ class ExportTests(unittest.TestCase):
                         result.write_bytes(b'exported')
                         return result
                 args = prepare_model.parse_args(['--model', str(checkpoint), '--batch-size', str(batch)])
-                result = prepare_model.export_model(args, FakeModel)
+                with patch.object(prepare_model, 'validate_model_shape') as validate:
+                    result = prepare_model.export_model(args, FakeModel)
+                    validate.assert_called_once()
                 expected = original if batch == 1 else checkpoint.with_name(f'yolo26n-b{batch}.onnx')
                 self.assertEqual(Path(result['onnx']), expected)
                 self.assertEqual(expected.read_bytes(), b'exported')

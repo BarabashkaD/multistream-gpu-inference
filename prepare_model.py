@@ -4,8 +4,8 @@
 # Additional terms under AGPL-3.0 section 7 apply: see NOTICE.
 """Export YOLO weights to a static ONNX model for one temporal batch.
 
-Batch 1 retains checkpoint.onnx. Larger batches use checkpoint-bN.onnx and
-export in an isolated directory, preserving batch 1 even if export fails.
+Default 640x640 batch 1 retains checkpoint.onnx. Nondefault shapes/batches use
+distinct names. Isolated export preserves existing models if export/validation fails.
 """
 from __future__ import annotations
 import argparse
@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from input_shape import add_imgsz_argument, normalize_imgsz, model_filename, validate_model_shape
 
 os.environ["YOLO_CONFIG_DIR"] = str(Path(__file__).resolve().parent / ".ultralytics")
 
@@ -28,7 +29,7 @@ def positive_int(value: str) -> int:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="yolo26n.pt")
-    parser.add_argument("--imgsz", type=int, default=640)
+    add_imgsz_argument(parser)
     parser.add_argument("--opset", type=int, default=12)
     parser.add_argument("--batch-size", type=positive_int, default=1)
     return parser.parse_args(argv)
@@ -42,26 +43,24 @@ def export_model(args, model_factory=None):
         from ultralytics import YOLO
         model_factory = YOLO
     model = model_factory(args.model)
-    options = dict(format="onnx", imgsz=args.imgsz, opset=args.opset,
+    imgsz = normalize_imgsz(args.imgsz)
+    options = dict(format="onnx", imgsz=imgsz, opset=args.opset,
                    batch=args.batch_size, dynamic=False, simplify=False,
                    nms=False, device="cpu")
-    if args.batch_size == 1:
-        output = Path(str(model.export(**options))).resolve()
-    else:
-        # YOLO has resolved/downloaded the checkpoint. Reload from its copy:
-        # the exporter derives its output path from the loaded checkpoint.
-        checkpoint = Path(model.ckpt_path).resolve()
-        if not checkpoint.is_file():
-            raise FileNotFoundError(checkpoint)
-        output = checkpoint.with_name(f"{checkpoint.stem}-b{args.batch_size}.onnx")
-        with tempfile.TemporaryDirectory(prefix=".batch-export-", dir=checkpoint.parent) as directory:
-            temporary_checkpoint = Path(directory) / checkpoint.name
-            shutil.copy2(checkpoint, temporary_checkpoint)
-            temporary_model = model_factory(str(temporary_checkpoint))
-            exported = Path(str(temporary_model.export(**options))).resolve()
-            if exported.parent != Path(directory).resolve():
-                raise RuntimeError(f"Exporter wrote outside its isolated directory: {exported}")
-            exported.replace(output)
+    checkpoint = Path(model.ckpt_path).resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(checkpoint)
+    output = model_filename(checkpoint, args.batch_size, imgsz)
+    # Always isolate export: failed validation must not replace a working model.
+    with tempfile.TemporaryDirectory(prefix=".batch-export-", dir=checkpoint.parent) as directory:
+        temporary_checkpoint = Path(directory) / checkpoint.name
+        shutil.copy2(checkpoint, temporary_checkpoint)
+        temporary_model = model_factory(str(temporary_checkpoint))
+        exported = Path(str(temporary_model.export(**options))).resolve()
+        if exported.parent != Path(directory).resolve():
+            raise RuntimeError(f"Exporter wrote outside its isolated directory: {exported}")
+        validate_model_shape(exported, args.batch_size, imgsz)
+        exported.replace(output)
     return {"checkpoint": args.model, "onnx": str(output), "imgsz": args.imgsz,
             "opset": args.opset, "batch_size": args.batch_size}
 

@@ -198,3 +198,49 @@ The opt-in GPU test instruments actual ONNX Runtime calls and tracker updates,
 including a partial tail and a second loop. Benchmark speed separately using equal
 clip/confidence/warmup/loop settings and multiple repeats; unit tests do not prove
 throughput gains or detection accuracy equivalence.
+
+### Model input size (v1)
+
+`--imgsz` accepts one square size or two numbers in **height width** order.
+The default remains `--imgsz 640` (640×640). It is independent of `--batch-size`
+(default 1). Dimensions must be positive multiples of 32. Select a size at
+process startup; a running static ONNX session does not switch shapes.
+
+```powershell
+python prepare_model.py --model yolo26n.pt --imgsz 384 640 --batch-size 4
+python run_demo.py --input data/pexels-36304379.mp4 --model yolo26n-640x384-b4.onnx --imgsz 384 640 --batch-size 4 --no-display
+```
+
+The launcher accepts the same arguments. Export one static model per size and
+batch combination. Square default models retain `yolo26n.onnx` / `yolo26n-b4.onnx`;
+rectangular models use `yolo26n-640x384.onnx` / `yolo26n-640x384-b4.onnx`
+(filenames use width×height). Export is isolated and validated before replacing
+its destination. Runtime rejects mismatched graph shape, dtype or batch/size
+metadata before opening the decoder; re-export legacy models with missing metadata.
+
+For 1920×1080 video, both inputs contain a resized 640×360 image without crop or
+stretch. 640×384 reduces the top/bottom padding from 140 to 12 pixels each.
+The model input has 40% fewer pixels, but speedup and equal detection quality
+are **not guaranteed**. A portrait or 4:3 source may lose useful input resolution;
+640×384 is not a universal replacement for the square default.
+
+CPU and CUDA preprocessing use centered letterbox; boxes/tracks remain in the
+original image coordinates. Display and MP4 dimensions are unchanged. JSON includes
+`input_height`, `input_width` and `model_input_shape`. Tail batches and tracker
+updates retain the temporal-batching contract.
+
+Validation commands (CPU unit tests, no media/GPU required for shape/export tests):
+
+```powershell
+python -m unittest discover -s tests -p test_input_shape.py -v
+python -m unittest discover -s tests -p test_export_cli.py -v
+```
+
+The opt-in real GPU contract additionally accepts `V1_BATCH_IMGSZ="384 640"`
+and needs `V1_BATCH_MODEL`, `V1_BATCH_SIZE`, `V1_BATCH_CLIP` to match. GPU export,
+real inference, GUI and accuracy/performance comparisons for this size change are
+pending. Compare shapes at the same batch first, using the same checkpoint,
+provider, clip, thresholds, warmup and repeated runs. Compare FPS, memory and
+latency separately; prediction agreement against square input is not ground-truth
+accuracy. Do not reuse the earlier batching-only FPS numbers as evidence for this
+change.

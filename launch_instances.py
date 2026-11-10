@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import time
+from input_shape import add_imgsz_argument, normalize_imgsz
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -34,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tracker", default="bytetrack.yaml")
     parser.add_argument("--conf", type=float, default=.25)
     parser.add_argument("--iou", type=float, default=.7)
-    parser.add_argument("--imgsz", type=int, default=640)
+    add_imgsz_argument(parser)
     parser.add_argument("--batch-size", type=int, default=1, help="Sequential frames per inference (default: 1)")
     parser.add_argument("--loops", type=int, default=1, help="1/N finite passes, 0 until user stop")
     parser.add_argument("--max-frames", type=int, default=0, help="Per-loop test bound; zero means full source")
@@ -80,7 +81,7 @@ def child_command(args: argparse.Namespace, instance_id: str, output_path: Path 
         "--tracker", args.tracker,
         "--conf", str(args.conf),
         "--iou", str(args.iou),
-        "--imgsz", str(args.imgsz),
+        "--imgsz", *map(str, normalize_imgsz(args.imgsz)),
         "--batch-size", str(args.batch_size),
         "--loops", str(args.loops),
         "--max-frames", str(args.max_frames),

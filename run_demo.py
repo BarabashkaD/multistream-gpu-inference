@@ -30,6 +30,7 @@ from ultralytics import YOLO
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
 
 from video_reader import create_reader
+from input_shape import add_imgsz_argument, normalize_imgsz, validate_model_shape
 
 
 class CudaOrigImagePredictor(DetectionPredictor):
@@ -109,7 +110,7 @@ def parse_args():
     p.add_argument("--tracker", default="bytetrack.yaml")
     p.add_argument("--conf", type=float, default=.25)
     p.add_argument("--iou", type=float, default=.7)
-    p.add_argument("--imgsz", type=int, default=640)
+    add_imgsz_argument(p)
     p.add_argument("--batch-size", type=int, default=1, help="Sequential frames per inference; requires matching static ONNX export")
     p.add_argument("--backend", choices=("auto", "cuda", "cpu"), default="auto")
     p.add_argument("--loops", type=int, default=1, help="1=single pass, N=finite passes, 0=repeat until Q/Esc/window close/Ctrl-C")
@@ -208,18 +209,6 @@ def loop_output_path(base: Path | None, loop_id: int, total_loops: int) -> Path 
     return base.with_name(f"{base.stem}-loop-{loop_id:03d}{suffix}")
 
 
-def validate_model_shape(path, batch_size, imgsz):
-    """Reject silent AutoBackend splitting and unsupported dynamic/non-square inputs."""
-    import onnx
-    graph = onnx.load(str(path), load_external_data=False).graph
-    shape = [d.dim_value if d.HasField("dim_value") else None
-             for d in graph.input[0].type.tensor_type.shape.dim]
-    expected = [batch_size, 3, imgsz, imgsz]
-    if shape != expected:
-        raise ValueError(f"ONNX input {shape} does not match {expected}; export with --batch-size {batch_size} --imgsz {imgsz}")
-    return shape
-
-
 def run_one_loop(args, reader, model, backend, target_size, loop_id,
                  output_path, mailbox, stop_event, runtime):
     """Batch consecutive frames, tracking each real frame in order; flush at EOF/stop.
@@ -227,6 +216,7 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
     Ultralytics 8.4.190 pads a short static batch and trims raw outputs before
     tracking. Never pad source frames here: padding must not advance ByteTrack.
     """
+    target_size = normalize_imgsz(target_size)
     batch_size = args.batch_size
     writer = None
     read_count = processed = written = calls = 0
@@ -249,7 +239,7 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
         k = len(pending)
         fill_wait.extend((ready - item[3]) * 1000 for item in pending)
         kwargs = dict(persist=True, tracker=args.tracker, conf=args.conf,
-                      iou=args.iou, imgsz=target_size, batch=batch_size,
+                      iou=args.iou, imgsz=target_size, batch=batch_size, rect=False,
                       device=0 if backend == "cuda" else "cpu", verbose=False)
         try:
             if nvdec:
@@ -316,7 +306,7 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
             if nvdec:
                 detector_input, prep = reader.cuda_input(target_size)
                 if (detector_input.device.type != "cuda" or detector_input.dtype != reader._torch.float32
-                        or tuple(detector_input.shape) != (1, 3, target_size, target_size)):
+                        or tuple(detector_input.shape) != (1, 3, *target_size)):
                     raise RuntimeError("Invalid CUDA detector input")
                 if read_count == 1:
                     low, high = float(detector_input.min().item()), float(detector_input.max().item())
@@ -381,8 +371,8 @@ def process_stream(args, mailbox=None, stop_event=None):
         print(f"[backend] ORT available={avail}")
         print(f"[backend] ORT probe active={probe}")
         model = YOLO(str(args.model))
-        model_size = getattr(model, "imgsz", args.imgsz)
-        target_size = int(model_size[0] if isinstance(model_size, (tuple, list)) else model_size)
+        target_size = tuple(model_shape[2:])
+        print(f"[model] input={target_size[1]}x{target_size[0]} batch={args.batch_size}")
         if is_nvdec(reader) and backend != "cuda":
             raise RuntimeError("NVDEC memory mode requires CUDAExecutionProvider; refusing CPU fallback")
 
@@ -425,6 +415,8 @@ def process_stream(args, mailbox=None, stop_event=None):
             "instance_id": args.instance_id,
             "batch_size": args.batch_size,
             "model_input_shape": model_shape,
+            "input_height": model_shape[2],
+            "input_width": model_shape[3],
             "decoder": reader.backend,
             "memory_bytes": getattr(reader, "encoded_bytes_len", None),
             "memory_input": bool(getattr(reader, "encoded_bytes_len", None) is not None),
