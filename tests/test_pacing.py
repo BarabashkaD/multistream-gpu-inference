@@ -57,8 +57,9 @@ class Model:
 
 
 class PacingTests(unittest.TestCase):
-    def run_loop(self, n, batch=1, cost=0.0, pace='realtime', drop_policy='none', max_lag_s=0.5, stop=None):
-        clock = Clock()
+    def run_loop(self, n, batch=1, cost=0.0, pace='realtime', drop_policy='none', max_lag_s=0.5, stop=None,
+                 clock=None):
+        clock = clock or Clock()
         args = SimpleNamespace(batch_size=batch, tracker='bytetrack.yaml', conf=.25, iou=.7, max_frames=0,
                                pace=pace, drop_policy=drop_policy, max_lag_s=max_lag_s)
         model = Model(clock, cost)
@@ -102,22 +103,20 @@ class PacingTests(unittest.TestCase):
         self.assertLessEqual(stats['due_to_tracked_ms']['p95'], 200 + 60 + 1e-6)
 
     def test_stop_during_pacing_wait_ends_the_loop(self):
-        class StopWhileWaiting:
-            """Not set at first; a stop arrives during the first pacing wait."""
-            waits = []
+        stop = threading.Event()
 
-            def is_set(self):
-                return False
+        class StopWhileSleeping(Clock):
+            """A stop arrives during the first pacing sleep."""
 
-            def wait(self, seconds):
-                self.waits.append(seconds)
-                return True
+            def sleep(self, seconds):
+                super().sleep(seconds)
+                stop.set()
 
-        stop = StopWhileWaiting()
-        stats, model, _ = self.run_loop(10, stop=stop)
+        stats, model, clock = self.run_loop(10, stop=stop, clock=StopWhileSleeping())
         self.assertTrue(stats['stopped_by_user'])
         self.assertEqual(model.ids, [1])  # frame 1 is due at once; the stop arrives while waiting for frame 2
-        self.assertAlmostEqual(stop.waits[0], 1 / 25)
+        self.assertEqual(len(clock.sleeps), 1)
+        self.assertAlmostEqual(clock.sleeps[0], 1 / 25)
 
     def test_validation(self):
         with self.assertRaisesRegex(ValueError, 'needs --pace realtime'):

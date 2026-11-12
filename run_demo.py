@@ -328,12 +328,13 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
             if due is not None and not at_end:  # no wait for the end-of-stream read
                 delay = due - time.monotonic()
                 if delay > 0:
-                    if stop_event is not None:
-                        if stop_event.wait(delay):
-                            stopped = True
-                            break
-                    else:
-                        time.sleep(delay)
+                    # time.sleep, not stop_event.wait: on Windows Event.wait wakes 5-15 ms late, which would be
+                    # charged to every frame's latency. The delay is at most one frame period, so a stop is still
+                    # seen within it.
+                    time.sleep(delay)
+                    if stop_event is not None and stop_event.is_set():
+                        stopped = True
+                        break
             ok, frame, timestamp = reader.read(host_frame=host_before_track)
             if not ok:
                 break
