@@ -166,10 +166,9 @@ padding outputs before tracking. No artificial frames are recorded or counted.
 Ctrl-C (and launcher Ctrl-Break on Windows) requests a graceful stop in headless mode;
 an exception or forced process termination does not guarantee a flush.
 
-Files are still decoded as fast as possible; no artificial sleep or new realtime
-pacing is introduced. For a genuinely 25 FPS source, batch 8 would add up to 280 ms
-of accumulation wait (140 ms on average), plus processing. This is not a measurement
-of file/max-pace latency. Larger batches also require more GPU memory and can make
+By default files are decoded as fast as possible (`--pace max`). With `--pace realtime`
+(see [Real-time pacing](#real-time-pacing-v1)) batch 8 adds up to 280 ms of accumulation
+wait at 25 FPS (140 ms on average), plus processing. Larger batches also require more GPU memory and can make
 multi-process scaling worse. Batching concatenates prepared GPU tensors; it is not
 a zero-copy change.
 
@@ -244,3 +243,30 @@ provider, clip, thresholds, warmup and repeated runs. Compare FPS, memory and
 latency separately; prediction agreement against square input is not ground-truth
 accuracy. Do not reuse the earlier batching-only FPS numbers as evidence for this
 change.
+
+### Real-time pacing (v1)
+
+`--pace realtime` reads each frame no earlier than its source time: frame *k* of a
+loop is due *k* ÷ clip FPS after the loop starts (40 ms apart for the 25 FPS clip),
+as a live camera would deliver it. The default `--pace max` keeps the original
+behaviour: every frame as fast as possible.
+
+`--drop-policy oldest` (real time only) skips a frame read more than `--max-lag-s`
+(default 0.5 s) after its due time. The frame is still decoded, to keep the stream
+position, but it is neither inferred, tracked nor recorded, so ByteTrack sees a gap.
+The default `--drop-policy none` processes every frame, late or not.
+
+```powershell
+python run_demo.py --input data/pexels-36304379.mp4 --model yolo26n.onnx --pace realtime --no-display
+python launch_instances.py --instances 4 --headless --pace realtime --drop-policy oldest
+```
+
+Per loop, JSON adds `due_to_tracked_ms` p50/p95, from the frame's due time to the end
+of its batch's tracking, and `frames_dropped`; the summary adds `pace`, `drop_policy`,
+`max_lag_s` and the total `frames_dropped`. At max pace the due time is the moment the
+frame was read, so `due_to_tracked_ms` equals `read_to_batch_complete_ms`. This is the
+latency definition v2 and v3 use at 25 FPS.
+
+The model is loaded on the first frame of loop 1, so with `--drop-policy oldest` the
+first few frames of loop 1 can be dropped; leave loop 1 out of measurements. CPU tests:
+`python -m unittest discover -s tests -p test_pacing.py -v`.

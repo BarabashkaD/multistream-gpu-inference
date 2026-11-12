@@ -117,7 +117,26 @@ def parse_args():
     p.add_argument("--instance-id", default="single", help="Label used in GUI title and JSON")
     p.add_argument("--no-display", action="store_true")
     p.add_argument("--max-frames", type=int, default=0, help="Per-loop test bound; zero means full source")
+    add_pacing_arguments(p)
     return p.parse_args()
+
+
+def add_pacing_arguments(parser) -> None:
+    """Adds --pace, --drop-policy and --max-lag-s, shared with launch_instances.py."""
+    parser.add_argument("--pace", choices=("max", "realtime"), default="max",
+                        help="max: read frames as fast as possible (default); realtime: read each frame no earlier "
+                             "than its source time (frame index / clip FPS from the start of the loop)")
+    parser.add_argument("--drop-policy", choices=("none", "oldest"), default="none",
+                        help="oldest (realtime only): skip a frame read more than --max-lag-s after its source time")
+    parser.add_argument("--max-lag-s", type=float, default=0.5, help="Lateness limit for --drop-policy oldest")
+
+
+def validate_pacing(args) -> None:
+    """Raises ValueError for --drop-policy oldest without --pace realtime or a --max-lag-s that is not positive."""
+    if getattr(args, "drop_policy", "none") == "oldest" and getattr(args, "pace", "max") != "realtime":
+        raise ValueError("--drop-policy oldest needs --pace realtime: at max pace no frame is late")
+    if getattr(args, "max_lag_s", 0.5) <= 0:
+        raise ValueError("--max-lag-s must be > 0")
 
 
 def select(path, requested):
@@ -215,15 +234,23 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
 
     Ultralytics 8.4.190 pads a short static batch and trims raw outputs before
     tracking. Never pad source frames here: padding must not advance ByteTrack.
+
+    With --pace realtime, frame k of the loop is read no earlier than its due time, loop start + k / clip FPS. With
+    --drop-policy oldest, a frame read more than --max-lag-s after its due time is decoded but neither inferred nor
+    tracked, and counted as dropped. At max pace a frame's due time is the moment it was read.
     """
     target_size = normalize_imgsz(target_size)
     batch_size = args.batch_size
+    realtime = getattr(args, "pace", "max") == "realtime"
+    drop_late = getattr(args, "drop_policy", "none") == "oldest"
+    max_lag_s = getattr(args, "max_lag_s", 0.5)
     writer = None
-    read_count = processed = written = calls = 0
+    read_count = processed = written = calls = dropped = 0
     stopped = False
     processed_times = deque(maxlen=4096)
     fill_wait = deque(maxlen=4096)
     read_to_tracked = deque(maxlen=4096)
+    due_to_tracked = deque(maxlen=4096)
     batch_sizes = {}
     loop_start = time.monotonic()
     nvdec = is_nvdec(reader)
@@ -259,11 +286,12 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
         completed = time.monotonic()
         processed_times.extend([completed] * k)
         read_to_tracked.extend((completed - item[3]) * 1000 for item in pending)
+        due_to_tracked.extend((completed - item[5]) * 1000 for item in pending)
         if runtime["actual"] is None:
             session = getattr(getattr(getattr(model, "predictor", None), "model", None), "session", None)
             if session is not None:
                 runtime["actual"] = session.get_providers()
-        for (frame, _, device_frame, _, frame_id), result in zip(pending, results):
+        for (frame, _, device_frame, _, frame_id, _), result in zip(pending, results):
             processed += 1
             if mailbox is not None and writer is None and mailbox.has_pending():
                 mailbox.note_drop()
@@ -295,13 +323,29 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
                 break
             if args.max_frames and read_count >= args.max_frames:
                 break
+            due = loop_start + read_count / reader.fps if realtime else None
+            at_end = bool(reader.frame_count) and read_count >= reader.frame_count
+            if due is not None and not at_end:  # no wait for the end-of-stream read
+                delay = due - time.monotonic()
+                if delay > 0:
+                    if stop_event is not None:
+                        if stop_event.wait(delay):
+                            stopped = True
+                            break
+                    else:
+                        time.sleep(delay)
             ok, frame, timestamp = reader.read(host_frame=host_before_track)
             if not ok:
                 break
             read_at = time.monotonic()
             read_count += 1
+            if due is None:
+                due = read_at
             if host_before_track and (frame is None or frame.shape[:2] != (reader.height, reader.width)):
                 raise RuntimeError("Unexpected decoder frame shape")
+            if drop_late and read_at - due > max_lag_s:
+                dropped += 1  # decoded to keep the stream position, but never inferred or tracked
+                continue
             detector_input = device_frame = None
             if nvdec:
                 detector_input, prep = reader.cuda_input(target_size)
@@ -314,7 +358,7 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
                         raise RuntimeError(f"Invalid CUDA input range: {low}, {high}")
                 if frame is None and (writer is not None or mailbox is not None):
                     device_frame = reader.last_device_frame
-            pending.append((frame, detector_input, device_frame, read_at, read_count))
+            pending.append((frame, detector_input, device_frame, read_at, read_count, due))
             if len(pending) == batch_size:
                 flush()
         flush()
@@ -330,6 +374,7 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
         return dict(loop=loop_id, frames_read=read_count, frames_processed=processed,
                     frames_written=written, inference_batches=calls, batch_sizes=batch_sizes,
                     batch_fill_wait_ms=percentiles(fill_wait), read_to_batch_complete_ms=percentiles(read_to_tracked),
+                    due_to_tracked_ms=percentiles(due_to_tracked), frames_dropped=dropped,
                     latency_samples_retained=len(read_to_tracked),
                     output=str(output_path) if output_path else None,
                     processing_seconds=elapsed, processing_fps=processed / elapsed,
@@ -349,6 +394,7 @@ def process_stream(args, mailbox=None, stop_event=None):
     NVDEC is requested without CUDA or no loop completes. Always closes the reader."""
     if args.batch_size < 1:
         raise ValueError("--batch-size must be >= 1")
+    validate_pacing(args)
     model_shape = validate_model_shape(args.model, args.batch_size, args.imgsz)
     reader = create_reader(args.input, args.decoder, memory_input=True)
     runtime = {"actual": None}
@@ -358,6 +404,7 @@ def process_stream(args, mailbox=None, stop_event=None):
     loops_completed = 0
     total_frames = 0
     total_written = 0
+    total_dropped = 0
     total_start = None
     total_end = None
     stopped_by_user = False
@@ -394,6 +441,7 @@ def process_stream(args, mailbox=None, stop_event=None):
             loops_completed += 1
             total_frames += loop_stats["frames_processed"]
             total_written += loop_stats["frames_written"]
+            total_dropped += loop_stats["frames_dropped"]
             all_processed_times.extend(loop_stats.pop("_processed_times"))
             loop_start = loop_stats.pop("_start")
             if total_start is None:
@@ -424,7 +472,11 @@ def process_stream(args, mailbox=None, stop_event=None):
             "loops_completed": loops_completed,
             "loops": list(loops),
             "loops_history_retained": len(loops),
+            "pace": getattr(args, "pace", "max"),
+            "drop_policy": getattr(args, "drop_policy", "none"),
+            "max_lag_s": getattr(args, "max_lag_s", 0.5),
             "frames_processed": total_frames,
+            "frames_dropped": total_dropped,
             "frames_written": total_written,
             "processing_seconds": total_seconds,
             "processing_fps": total_frames / total_seconds if total_frames else 0.0,
@@ -553,6 +605,7 @@ def main():
         raise ValueError("--loops must be >= 0")
     if args.loops == 0 and args.output is not None:
         raise ValueError("--output cannot be combined with --loops 0; use a finite loop count")
+    validate_pacing(args)
     if not args.input.is_file():
         raise FileNotFoundError(args.input)
     if not args.model.is_file():

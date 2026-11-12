@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1, help="Sequential frames per inference (default: 1)")
     parser.add_argument("--loops", type=int, default=1, help="1/N finite passes, 0 until user stop")
     parser.add_argument("--max-frames", type=int, default=0, help="Per-loop test bound; zero means full source")
+    parser.add_argument("--pace", choices=("max", "realtime"), default="max",
+                        help="max: as fast as possible (default); realtime: each child reads frames at the clip FPS")
+    parser.add_argument("--drop-policy", choices=("none", "oldest"), default="none",
+                        help="oldest (realtime only): children skip frames more than --max-lag-s late")
+    parser.add_argument("--max-lag-s", type=float, default=0.5, help="Lateness limit for --drop-policy oldest")
     parser.add_argument("--headless", action="store_true", help="Pass --no-display to every child")
     parser.add_argument(
         "--run-dir",
@@ -85,6 +90,9 @@ def child_command(args: argparse.Namespace, instance_id: str, output_path: Path 
         "--batch-size", str(args.batch_size),
         "--loops", str(args.loops),
         "--max-frames", str(args.max_frames),
+        "--pace", args.pace,
+        "--drop-policy", args.drop_policy,
+        "--max-lag-s", str(args.max_lag_s),
     ]
     if args.headless:
         command.append("--no-display")
@@ -133,6 +141,10 @@ def main() -> int:
         raise ValueError("--loops must be >= 0")
     if args.max_frames < 0:
         raise ValueError("--max-frames must be >= 0")
+    if args.drop_policy == "oldest" and args.pace != "realtime":
+        raise ValueError("--drop-policy oldest needs --pace realtime")
+    if args.max_lag_s <= 0:
+        raise ValueError("--max-lag-s must be > 0")
     if args.loops == 0 and args.output_dir is not None:
         raise ValueError("--output-dir cannot be used with --loops 0; choose finite loops for recording")
     input_path = args.input.resolve()
