@@ -12,3 +12,6 @@ torchvision==0.29.1+cu130
 lap==0.5.13
 ml-dtypes==0.6.0
 PyNvVideoCodec==2.2.3
+# bench.py: GPU and host load sampling
+psutil==7.2.2
+nvidia-ml-py==13.615.71

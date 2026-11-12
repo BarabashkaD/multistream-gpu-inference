@@ -284,3 +284,64 @@ latency definition v2 and v3 use at 25 FPS.
 The model is loaded on the first frame of loop 1, so with `--drop-policy oldest` the
 first few frames of loop 1 can be dropped; leave loop 1 out of measurements. CPU tests:
 `python -m unittest discover -s tests -p test_pacing.py -v`.
+
+## Benchmark (v1)
+
+`bench.py` measures how v1 scales with the number of processes. For each count in
+`--instances` it runs `launch_instances.py` (headless, NVDEC, CUDA, `--loops` passes
+of the clip per process), samples the GPU with NVML and the host with psutil once a
+second, and summarizes the JSON summary of every process. It runs the counts one
+after another; nothing else should use the GPU meanwhile. It needs `psutil` and
+`nvidia-ml-py`, pinned in the requirements files.
+
+Reproduce the max-pace and real-time tables at 640x384 from the repository root:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python prepare_model.py --model yolo26n.pt --imgsz 384 640 --batch-size 1   # yolo26n-640x384.onnx
+python prepare_model.py --model yolo26n.pt --imgsz 384 640 --batch-size 8   # yolo26n-640x384-b8.onnx
+
+python bench.py --model yolo26n-640x384.onnx --imgsz 384 640 --batch-size 1 --instances 1,2,3,4,5,6,7,8
+python bench.py --model yolo26n-640x384.onnx --imgsz 384 640 --batch-size 1 --instances 1,2,3,4,5,6,7,8 --pace realtime
+python bench.py --model yolo26n-640x384.onnx --imgsz 384 640 --batch-size 1 --instances 1,2,3,4,5,6,7,8 --pace realtime --drop-policy oldest
+python bench.py --model yolo26n-640x384-b8.onnx --imgsz 384 640 --batch-size 8 --instances 1,2,3,4,5,6,7,8 --pace realtime
+```
+
+`--loops` defaults to 3; loop 1 includes loading the model and warm-up, so only loops
+2 to N are measured. `--drop-policy oldest` uses each process's default limit, 1.1
+frame periods, unless `--max-lag-s` is given, which is then passed on. Results go to
+`results\v1-<pace>[-drop]-<W>x<H>-b<N>` unless `--out` names another folder; an
+existing folder is never overwritten. Each folder holds `table.md`, `bench.json`
+(configuration, points and why the run stopped) and per count `nN\summary.json`,
+`nN\samples.json` (the 1-second samples), `nN\launcher.out` and `nN\logs\`. The
+absolute paths of the repository, the result folder and the home folder are written
+as `<repo>`, `<out>` and `<home>`, in the logs too.
+
+The table columns, per process count:
+
+| Column | Meaning |
+| --- | --- |
+| Processes | Independent `run_demo.py` processes, one stream each |
+| Total FPS | Sum over processes of their FPS: the mean `processing_fps` of loops 2 to N (frames tracked per second) |
+| Slowest process FPS | The lowest FPS of one process; at real time 25 means it kept up with the 25 FPS clip |
+| Dropped | Frames skipped by `--drop-policy oldest` in loops 2 to N, over all processes (loop 1 drops are in `loop1_dropped`) |
+| Latency p50, ms | Per process the mean of its loops' p50 of `due_to_tracked_ms`, from the frame's due time to the end of its tracking; the highest process is shown. At max pace the due time is the read time |
+| Latency p95, ms | Per process the highest loop p95 of `due_to_tracked_ms`; the highest process is shown |
+| GPU busy, % | NVML share of time the GPU ran any kernel, averaged from when every process is in loop 2 until the first one finishes |
+| NVDEC, % | NVML video decoder utilization, same window |
+| CPU, % | psutil, all logical CPUs, same window |
+| GPU memory (app), MB | Peak GPU memory used during the count minus the memory in use before it started |
+
+If no sample falls in the steady window (very short runs), the load columns average
+the whole run and `summary.json` says `"load_window": "whole run"`.
+
+Safety: a count is stopped, and the launcher with all its `run_demo.py` processes
+killed, after `--timeout-s` (default 600 s) or when free GPU memory stays below
+`--min-free-gpu-mb` (default 400) or available host memory below `--min-free-host-gb`
+(default 2) for 3 samples in a row; it is recorded as an error and no larger count is
+run. A completed count whose minimum free memory fell below a guard is kept, but the
+run stops there. Ctrl-C stops the same way and still writes `bench.json`.
+
+The numbers depend on the GPU, driver, CPU, memory and what else runs on the
+machine; compare only results measured on the same machine. CPU tests of the
+summaries: `python -m unittest discover -s tests -p test_bench.py -v`.
