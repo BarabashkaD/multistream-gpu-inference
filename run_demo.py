@@ -129,14 +129,26 @@ def add_pacing_arguments(parser) -> None:
     parser.add_argument("--drop-policy", choices=("none", "oldest"), default="none",
                         help="oldest (realtime only): skip a frame read more than --max-lag-s after its source time")
     parser.add_argument("--max-lag-s", type=float, default=0.5, help="Lateness limit for --drop-policy oldest")
+    parser.add_argument("--max-lag-frames", type=float, default=None,
+                        help="Lateness limit in frame periods, e.g. 1.1 = one frame plus 10%% tolerance (44 ms at "
+                             "25 FPS); overrides --max-lag-s")
 
 
 def validate_pacing(args) -> None:
-    """Raises ValueError for --drop-policy oldest without --pace realtime or a --max-lag-s that is not positive."""
+    """Raises ValueError for --drop-policy oldest without --pace realtime, or a lateness limit that is not positive."""
     if getattr(args, "drop_policy", "none") == "oldest" and getattr(args, "pace", "max") != "realtime":
         raise ValueError("--drop-policy oldest needs --pace realtime: at max pace no frame is late")
     if getattr(args, "max_lag_s", 0.5) <= 0:
         raise ValueError("--max-lag-s must be > 0")
+    frames = getattr(args, "max_lag_frames", None)
+    if frames is not None and frames <= 0:
+        raise ValueError("--max-lag-frames must be > 0")
+
+
+def max_lag_seconds(args, fps: float) -> float:
+    """The lateness limit in seconds: --max-lag-frames frame periods when given, else --max-lag-s."""
+    frames = getattr(args, "max_lag_frames", None)
+    return frames / fps if frames is not None else getattr(args, "max_lag_s", 0.5)
 
 
 def select(path, requested):
@@ -243,7 +255,7 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
     batch_size = args.batch_size
     realtime = getattr(args, "pace", "max") == "realtime"
     drop_late = getattr(args, "drop_policy", "none") == "oldest"
-    max_lag_s = getattr(args, "max_lag_s", 0.5)
+    max_lag_s = max_lag_seconds(args, reader.fps)
     writer = None
     read_count = processed = written = calls = dropped = 0
     stopped = False
@@ -376,6 +388,7 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
                     frames_written=written, inference_batches=calls, batch_sizes=batch_sizes,
                     batch_fill_wait_ms=percentiles(fill_wait), read_to_batch_complete_ms=percentiles(read_to_tracked),
                     due_to_tracked_ms=percentiles(due_to_tracked), frames_dropped=dropped,
+                    max_lag_ms=max_lag_s * 1000 if drop_late else None,
                     latency_samples_retained=len(read_to_tracked),
                     output=str(output_path) if output_path else None,
                     processing_seconds=elapsed, processing_fps=processed / elapsed,
@@ -475,7 +488,8 @@ def process_stream(args, mailbox=None, stop_event=None):
             "loops_history_retained": len(loops),
             "pace": getattr(args, "pace", "max"),
             "drop_policy": getattr(args, "drop_policy", "none"),
-            "max_lag_s": getattr(args, "max_lag_s", 0.5),
+            "max_lag_s": max_lag_seconds(args, reader.fps),
+            "max_lag_frames": getattr(args, "max_lag_frames", None),
             "frames_processed": total_frames,
             "frames_dropped": total_dropped,
             "frames_written": total_written,

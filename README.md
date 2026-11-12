@@ -256,14 +256,22 @@ behaviour: every frame as fast as possible.
 position, but it is neither inferred, tracked nor recorded, so ByteTrack sees a gap.
 The default `--drop-policy none` processes every frame, late or not.
 
+`--max-lag-frames F` sets the limit in frame periods instead, and overrides `--max-lag-s`.
+`--max-lag-frames 1.1` drops a frame once the next one is already due, with 10%
+tolerance for jitter: 44 ms at 25 FPS. The process then always works on a current
+frame, at the cost of dropping as soon as it falls behind, even briefly. The 0.5 s
+default tolerates short slowdowns and matches v2 and v3.
+
 ```powershell
 python run_demo.py --input data/pexels-36304379.mp4 --model yolo26n.onnx --pace realtime --no-display
 python launch_instances.py --instances 4 --headless --pace realtime --drop-policy oldest
+python launch_instances.py --instances 4 --headless --pace realtime --drop-policy oldest --max-lag-frames 1.1
 ```
 
 Per loop, JSON adds `due_to_tracked_ms` p50/p95, from the frame's due time to the end
-of its batch's tracking, and `frames_dropped`; the summary adds `pace`, `drop_policy`,
-`max_lag_s` and the total `frames_dropped`. At max pace the due time is the moment the
+of its batch's tracking, `frames_dropped` and the limit in force, `max_lag_ms`. The
+summary adds `pace`, `drop_policy`, the effective `max_lag_s`, `max_lag_frames` and the
+total `frames_dropped`. At max pace the due time is the moment the
 frame was read, so `due_to_tracked_ms` equals `read_to_batch_complete_ms`. This is the
 latency definition v2 and v3 use at 25 FPS.
 

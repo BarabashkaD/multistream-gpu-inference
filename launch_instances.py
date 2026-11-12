@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--drop-policy", choices=("none", "oldest"), default="none",
                         help="oldest (realtime only): children skip frames more than --max-lag-s late")
     parser.add_argument("--max-lag-s", type=float, default=0.5, help="Lateness limit for --drop-policy oldest")
+    parser.add_argument("--max-lag-frames", type=float, default=None,
+                        help="Lateness limit in frame periods (1.1 = one frame + 10%%); overrides --max-lag-s")
     parser.add_argument("--headless", action="store_true", help="Pass --no-display to every child")
     parser.add_argument(
         "--run-dir",
@@ -94,6 +96,8 @@ def child_command(args: argparse.Namespace, instance_id: str, output_path: Path 
         "--drop-policy", args.drop_policy,
         "--max-lag-s", str(args.max_lag_s),
     ]
+    if args.max_lag_frames is not None:
+        command.extend(["--max-lag-frames", str(args.max_lag_frames)])
     if args.headless:
         command.append("--no-display")
     if output_path is not None:
@@ -145,6 +149,8 @@ def main() -> int:
         raise ValueError("--drop-policy oldest needs --pace realtime")
     if args.max_lag_s <= 0:
         raise ValueError("--max-lag-s must be > 0")
+    if args.max_lag_frames is not None and args.max_lag_frames <= 0:
+        raise ValueError("--max-lag-frames must be > 0")
     if args.loops == 0 and args.output_dir is not None:
         raise ValueError("--output-dir cannot be used with --loops 0; choose finite loops for recording")
     input_path = args.input.resolve()
