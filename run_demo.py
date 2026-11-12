@@ -121,6 +121,10 @@ def parse_args():
     return p.parse_args()
 
 
+DEFAULT_MAX_LAG_FRAMES = 1.1
+"""The default lateness limit in frame periods: one frame plus 10% tolerance for jitter (44 ms at 25 FPS)."""
+
+
 def add_pacing_arguments(parser) -> None:
     """Adds --pace, --drop-policy and --max-lag-s, shared with launch_instances.py."""
     parser.add_argument("--pace", choices=("max", "realtime"), default="max",
@@ -128,27 +132,28 @@ def add_pacing_arguments(parser) -> None:
                              "than its source time (frame index / clip FPS from the start of the loop)")
     parser.add_argument("--drop-policy", choices=("none", "oldest"), default="none",
                         help="oldest (realtime only): skip a frame read more than --max-lag-s after its source time")
-    parser.add_argument("--max-lag-s", type=float, default=0.5, help="Lateness limit for --drop-policy oldest")
-    parser.add_argument("--max-lag-frames", type=float, default=None,
-                        help="Lateness limit in frame periods, e.g. 1.1 = one frame plus 10%% tolerance (44 ms at "
-                             "25 FPS); overrides --max-lag-s")
+    parser.add_argument("--max-lag-s", type=float, default=None,
+                        help="Lateness limit in seconds for --drop-policy oldest (default: 1.1 frame periods of the "
+                             "clip, i.e. 1.1 / clip FPS: 44 ms at 25 FPS)")
 
 
 def validate_pacing(args) -> None:
-    """Raises ValueError for --drop-policy oldest without --pace realtime, or a lateness limit that is not positive."""
+    """Raises ValueError for --drop-policy oldest without --pace realtime, or an explicit lateness limit that is not
+    positive. A missing or None --max-lag-s means the frame-based default."""
     if getattr(args, "drop_policy", "none") == "oldest" and getattr(args, "pace", "max") != "realtime":
         raise ValueError("--drop-policy oldest needs --pace realtime: at max pace no frame is late")
-    if getattr(args, "max_lag_s", 0.5) <= 0:
+    max_lag_s = getattr(args, "max_lag_s", None)
+    if max_lag_s is not None and max_lag_s <= 0:
         raise ValueError("--max-lag-s must be > 0")
-    frames = getattr(args, "max_lag_frames", None)
-    if frames is not None and frames <= 0:
-        raise ValueError("--max-lag-frames must be > 0")
 
 
-def max_lag_seconds(args, fps: float) -> float:
-    """The lateness limit in seconds: --max-lag-frames frame periods when given, else --max-lag-s."""
-    frames = getattr(args, "max_lag_frames", None)
-    return frames / fps if frames is not None else getattr(args, "max_lag_s", 0.5)
+def max_lag_seconds(args, fps: float) -> float | None:
+    """The lateness limit in seconds: --max-lag-s when given, else DEFAULT_MAX_LAG_FRAMES frame periods of a clip
+    at `fps` (None if `fps` is not positive, since a frame period is then unknown)."""
+    max_lag_s = getattr(args, "max_lag_s", None)
+    if max_lag_s is not None:
+        return max_lag_s
+    return DEFAULT_MAX_LAG_FRAMES / fps if fps > 0 else None
 
 
 def select(path, requested):
@@ -248,13 +253,16 @@ def run_one_loop(args, reader, model, backend, target_size, loop_id,
     tracking. Never pad source frames here: padding must not advance ByteTrack.
 
     With --pace realtime, frame k of the loop is read no earlier than its due time, loop start + k / clip FPS. With
-    --drop-policy oldest, a frame read more than --max-lag-s after its due time is decoded but neither inferred nor
-    tracked, and counted as dropped. At max pace a frame's due time is the moment it was read.
+    --drop-policy oldest, a frame read more than the lateness limit (--max-lag-s, default 1.1 frame periods) after its
+    due time is decoded but neither inferred nor tracked, and counted as dropped. At max pace a frame's due time is
+    the moment it was read.
     """
     target_size = normalize_imgsz(target_size)
     batch_size = args.batch_size
     realtime = getattr(args, "pace", "max") == "realtime"
     drop_late = getattr(args, "drop_policy", "none") == "oldest"
+    if realtime and not reader.fps > 0:
+        raise RuntimeError(f"--pace realtime needs a positive clip FPS, got {reader.fps}")
     max_lag_s = max_lag_seconds(args, reader.fps)
     writer = None
     read_count = processed = written = calls = dropped = 0
@@ -489,7 +497,6 @@ def process_stream(args, mailbox=None, stop_event=None):
             "pace": getattr(args, "pace", "max"),
             "drop_policy": getattr(args, "drop_policy", "none"),
             "max_lag_s": max_lag_seconds(args, reader.fps),
-            "max_lag_frames": getattr(args, "max_lag_frames", None),
             "frames_processed": total_frames,
             "frames_dropped": total_dropped,
             "frames_written": total_written,

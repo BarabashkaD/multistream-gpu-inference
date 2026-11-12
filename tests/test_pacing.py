@@ -57,12 +57,11 @@ class Model:
 
 
 class PacingTests(unittest.TestCase):
-    def run_loop(self, n, batch=1, cost=0.0, pace='realtime', drop_policy='none', max_lag_s=0.5, stop=None,
-                 clock=None, max_lag_frames=None):
+    def run_loop(self, n, batch=1, cost=0.0, pace='realtime', drop_policy='none', max_lag_s=None, stop=None,
+                 clock=None):
         clock = clock or Clock()
         args = SimpleNamespace(batch_size=batch, tracker='bytetrack.yaml', conf=.25, iou=.7, max_frames=0,
-                               pace=pace, drop_policy=drop_policy, max_lag_s=max_lag_s,
-                               max_lag_frames=max_lag_frames)
+                               pace=pace, drop_policy=drop_policy, max_lag_s=max_lag_s)
         model = Model(clock, cost)
         with patch.object(demo, 'time', clock):
             stats = demo.run_one_loop(args, Reader(n), model, 'cpu', 640, 1, None, None, stop, {'actual': None})
@@ -103,18 +102,36 @@ class PacingTests(unittest.TestCase):
         self.assertEqual(model.ids, sorted(model.ids))  # skipped frames leave gaps, order is kept
         self.assertLessEqual(stats['due_to_tracked_ms']['p95'], 200 + 60 + 1e-6)
 
-    def test_lag_in_frames_drops_after_one_period_plus_tolerance(self):
+    def test_default_limit_drops_after_one_period_plus_tolerance(self):
         # 50 ms per frame against a 40 ms period: 10 ms more behind with every processed frame.
-        stats, model, _ = self.run_loop(50, cost=0.05, drop_policy='oldest', max_lag_frames=1.1)
-        self.assertAlmostEqual(stats['max_lag_ms'], 44.0)  # 1.1 x 40 ms, overriding --max-lag-s 0.5
+        stats, model, _ = self.run_loop(50, cost=0.05, drop_policy='oldest')
+        self.assertAlmostEqual(stats['max_lag_ms'], 44.0)  # default: 1.1 x 40 ms at 25 FPS
         self.assertGreater(stats['frames_dropped'], 0)
         self.assertEqual(stats['frames_dropped'] + stats['frames_processed'], 50)
+        self.assertEqual(model.ids, sorted(model.ids))
         self.assertLessEqual(stats['due_to_tracked_ms']['p95'], 44 + 50 + 1e-6)  # accepted lag + one frame
 
-    def test_lag_in_frames_drops_nothing_while_processing_keeps_up(self):
-        stats, model, _ = self.run_loop(50, cost=0.03, drop_policy='oldest', max_lag_frames=1.1)
+    def test_default_limit_drops_nothing_while_processing_keeps_up(self):
+        stats, model, _ = self.run_loop(50, cost=0.03, drop_policy='oldest')
+        self.assertAlmostEqual(stats['max_lag_ms'], 44.0)
         self.assertEqual(stats['frames_dropped'], 0)
         self.assertEqual(model.ids, list(range(1, 51)))
+
+    def test_explicit_limit_is_used_as_given(self):
+        # 44 ms per frame: 4 ms more behind per frame, so 50 frames end 196 ms late. The default 44 ms limit drops;
+        # an explicit 0.5 s limit does not.
+        stats, model, _ = self.run_loop(50, cost=0.044, drop_policy='oldest', max_lag_s=0.5)
+        self.assertAlmostEqual(stats['max_lag_ms'], 500.0)
+        self.assertEqual(stats['frames_dropped'], 0)
+        self.assertEqual(model.ids, list(range(1, 51)))
+        stats, _, _ = self.run_loop(50, cost=0.044, drop_policy='oldest')
+        self.assertGreater(stats['frames_dropped'], 0)
+
+    def test_max_lag_ms_is_null_without_dropping(self):
+        stats, _, _ = self.run_loop(5)
+        self.assertIsNone(stats['max_lag_ms'])
+        stats, _, _ = self.run_loop(5, pace='max', max_lag_s=0.5)
+        self.assertIsNone(stats['max_lag_ms'])
 
     def test_stop_during_pacing_wait_ends_the_loop(self):
         stop = threading.Event()
@@ -135,25 +152,54 @@ class PacingTests(unittest.TestCase):
     def test_validation(self):
         with self.assertRaisesRegex(ValueError, 'needs --pace realtime'):
             demo.validate_pacing(SimpleNamespace(pace='max', drop_policy='oldest', max_lag_s=0.5))
-        with self.assertRaisesRegex(ValueError, 'max-lag-s'):
-            demo.validate_pacing(SimpleNamespace(pace='realtime', drop_policy='oldest', max_lag_s=0))
-        with self.assertRaisesRegex(ValueError, 'max-lag-frames'):
-            demo.validate_pacing(SimpleNamespace(pace='realtime', drop_policy='oldest', max_lag_s=0.5,
-                                                 max_lag_frames=0))
-        self.assertAlmostEqual(demo.max_lag_seconds(SimpleNamespace(max_lag_s=0.5, max_lag_frames=1.1), 25), 0.044)
-        self.assertAlmostEqual(demo.max_lag_seconds(SimpleNamespace(max_lag_s=0.5, max_lag_frames=None), 25), 0.5)
+        for bad in (0, -0.1):
+            with self.assertRaisesRegex(ValueError, 'max-lag-s'):
+                demo.validate_pacing(SimpleNamespace(pace='realtime', drop_policy='oldest', max_lag_s=bad))
+        self.assertAlmostEqual(demo.max_lag_seconds(SimpleNamespace(max_lag_s=None), 25), 0.044)
+        self.assertAlmostEqual(demo.max_lag_seconds(SimpleNamespace(max_lag_s=None), 30), 1.1 / 30)
+        self.assertAlmostEqual(demo.max_lag_seconds(SimpleNamespace(max_lag_s=0.5), 25), 0.5)
+        self.assertAlmostEqual(demo.max_lag_seconds(SimpleNamespace(), 25), 0.044)  # no field: the default
         demo.validate_pacing(SimpleNamespace(pace='realtime', drop_policy='oldest', max_lag_s=0.5))
+        demo.validate_pacing(SimpleNamespace(pace='realtime', drop_policy='oldest', max_lag_s=None))
         demo.validate_pacing(SimpleNamespace())  # older callers without pacing fields keep max pace
+
+    def test_run_demo_parses_max_lag_s(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        demo.add_pacing_arguments(parser)
+        self.assertIsNone(parser.parse_args([]).max_lag_s)
+        self.assertEqual(parser.parse_args(['--max-lag-s', '0.5']).max_lag_s, 0.5)
+        with patch('sys.stderr'), self.assertRaises(SystemExit):
+            parser.parse_args(['--max-lag-frames', '1.1'])  # removed: --max-lag-s is the only lateness option
 
     def test_launcher_forwards_pacing(self):
         import launch_instances
         with patch('sys.argv', ['launch_instances.py', '--pace', 'realtime', '--drop-policy', 'oldest',
-                                '--max-lag-s', '0.3', '--max-lag-frames', '1.1']):
+                                '--max-lag-s', '0.3']):
             args = launch_instances.parse_args()
         command = launch_instances.child_command(args, 'instance-01', None)
-        for flag, value in (('--pace', 'realtime'), ('--drop-policy', 'oldest'), ('--max-lag-s', '0.3'),
-                            ('--max-lag-frames', '1.1')):
+        for flag, value in (('--pace', 'realtime'), ('--drop-policy', 'oldest'), ('--max-lag-s', '0.3')):
             self.assertEqual(command[command.index(flag) + 1], value)
+        self.assertEqual(command.count('--max-lag-s'), 1)
+
+    def test_launcher_leaves_default_limit_to_each_child(self):
+        import launch_instances
+        with patch('sys.argv', ['launch_instances.py', '--pace', 'realtime', '--drop-policy', 'oldest']):
+            args = launch_instances.parse_args()
+        command = launch_instances.child_command(args, 'instance-01', None)
+        self.assertNotIn('--max-lag-s', command)  # each child computes 1.1 frame periods from its own clip FPS
+        self.assertNotIn('--max-lag-frames', command)
+        with patch('sys.argv', ['launch_instances.py', '--max-lag-frames', '1.1']), patch('sys.stderr'), \
+                self.assertRaises(SystemExit):
+            launch_instances.parse_args()
+
+    def test_launcher_rejects_non_positive_limit_before_starting_anything(self):
+        import launch_instances
+        with patch('sys.argv', ['launch_instances.py', '--pace', 'realtime', '--drop-policy', 'oldest',
+                                '--max-lag-s', '0']), \
+                patch.object(launch_instances, 'unique_run_dir', side_effect=AssertionError('must not run')):
+            with self.assertRaisesRegex(ValueError, 'max-lag-s'):
+                launch_instances.main()
 
 
 if __name__ == '__main__':

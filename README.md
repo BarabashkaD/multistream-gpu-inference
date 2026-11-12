@@ -251,27 +251,33 @@ loop is due *k* ÷ clip FPS after the loop starts (40 ms apart for the 25 FPS cl
 as a live camera would deliver it. The default `--pace max` keeps the original
 behaviour: every frame as fast as possible.
 
-`--drop-policy oldest` (real time only) skips a frame read more than `--max-lag-s`
-(default 0.5 s) after its due time. The frame is still decoded, to keep the stream
-position, but it is neither inferred, tracked nor recorded, so ByteTrack sees a gap.
-The default `--drop-policy none` processes every frame, late or not.
+`--drop-policy oldest` (real time only) skips a frame read more than the lateness
+limit after its due time. The frame is still decoded, to keep the stream position,
+but it is neither inferred, tracked nor recorded, so ByteTrack sees a gap. The
+default `--drop-policy none` processes every frame, late or not.
 
-`--max-lag-frames F` sets the limit in frame periods instead, and overrides `--max-lag-s`.
-`--max-lag-frames 1.1` drops a frame once the next one is already due, with 10%
-tolerance for jitter: 44 ms at 25 FPS. The process then always works on a current
-frame, at the cost of dropping as soon as it falls behind, even briefly. The 0.5 s
-default tolerates short slowdowns and matches v2 and v3.
+`--max-lag-s S` is the only lateness option. By default the limit is 1.1 frame
+periods of the clip being read, 1.1 ÷ clip FPS: 44 ms at 25 FPS. A frame is then
+dropped once the next one is already due, with 10% tolerance for jitter, so the
+process always works on a current frame, at the cost of dropping as soon as it
+falls behind, even briefly. An explicit value, such as `--max-lag-s 0.5`, is used
+as given and must be greater than 0; a longer limit tolerates short slowdowns.
+`launch_instances.py` forwards `--max-lag-s` only when it is given, so by default
+each process computes the limit from its own clip's FPS.
+
+**v2 and v3 use a fixed 0.5 s default**, so v1 now drops earlier than they do by
+default. Pass `--max-lag-s 0.5` to compare v1 with them on equal terms.
 
 ```powershell
 python run_demo.py --input data/pexels-36304379.mp4 --model yolo26n.onnx --pace realtime --no-display
 python launch_instances.py --instances 4 --headless --pace realtime --drop-policy oldest
-python launch_instances.py --instances 4 --headless --pace realtime --drop-policy oldest --max-lag-frames 1.1
+python launch_instances.py --instances 4 --headless --pace realtime --drop-policy oldest --max-lag-s 0.5
 ```
 
 Per loop, JSON adds `due_to_tracked_ms` p50/p95, from the frame's due time to the end
-of its batch's tracking, `frames_dropped` and the limit in force, `max_lag_ms`. The
-summary adds `pace`, `drop_policy`, the effective `max_lag_s`, `max_lag_frames` and the
-total `frames_dropped`. At max pace the due time is the moment the
+of its batch's tracking, `frames_dropped` and the limit in force when dropping is
+on, `max_lag_ms` (null otherwise). The summary adds `pace`, `drop_policy`, the
+effective limit in seconds, `max_lag_s`, and the total `frames_dropped`. At max pace the due time is the moment the
 frame was read, so `due_to_tracked_ms` equals `read_to_batch_complete_ms`. This is the
 latency definition v2 and v3 use at 25 FPS.
 
