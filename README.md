@@ -330,7 +330,7 @@ The table columns, per process count:
 | GPU busy, % | NVML share of time the GPU ran any kernel, averaged from when every process is in loop 2 until the first one finishes |
 | NVDEC, % | NVML video decoder utilization, same window |
 | CPU, % | psutil, all logical CPUs, same window |
-| GPU memory (app), MB | Peak GPU memory used during the count minus the memory in use before it started |
+| GPU memory (app), MB | Peak GPU memory used during the count minus the memory in use before it started, read once it stops changing |
 
 If no sample falls in the steady window (very short runs), the load columns average
 the whole run and `summary.json` says `"load_window": "whole run"`.

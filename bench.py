@@ -14,7 +14,8 @@ prints at the end. Loop 1 includes loading the model and warm-up, so only loops 
   slowest process: the max over processes of p50 and, separately, of p95.
 - Dropped: frames skipped by --drop-policy oldest in loops 2..N, summed over processes (loop 1 is kept separately).
 - GPU busy, NVDEC and CPU: means over the window in which every process is in loop 2 or later, until the first
-  process finishes. GPU memory: the peak during the point minus the memory in use before it started.
+  process finishes. GPU memory: the peak during the point minus the memory in use before it started, read once that
+  has settled (memory of processes that just ended can take seconds to be released).
 
 A point is stopped (the whole process tree is killed) after --timeout-s or when free GPU memory or available host
 memory stays below its guard for 3 samples in a row; that point is recorded as an error and the configuration
@@ -275,6 +276,20 @@ def guard_breach(samples: list[dict], min_free_gpu_mb: float, min_free_host_gb: 
     return None
 
 
+def settled_memory_mb(read_used_mb, sleep=time.sleep, tolerance_mb: float = 32, timeout_s: float = 30) -> float:
+    """GPU memory in use once it has settled: reads `read_used_mb()` once a second until two readings in a row differ
+    by less than `tolerance_mb`, or `timeout_s` passes, and returns the last reading. Processes that just ended
+    (above all killed ones) can hold their memory for a few seconds, which would inflate the next baseline."""
+    previous = read_used_mb()
+    for _ in range(max(int(timeout_s), 1)):
+        sleep(1.0)
+        current = read_used_mb()
+        if abs(current - previous) < tolerance_mb:
+            return current
+        previous = current
+    return previous
+
+
 def kill_tree(psutil, root_pid: int, known: dict) -> list[int]:
     """Kills the launcher `root_pid`, all its descendants and every process in `known` (pid -> psutil.Process seen
     as a descendant earlier). Returns the pids still alive 10 s later."""
@@ -316,7 +331,7 @@ def run_point(args, n: int, nvml, psutil, handle, out_dir: Path, replacements) -
     logs = [run_dir / "logs" / f"instance-{i:02d}.log" for i in range(1, n + 1)]
     command = launcher_command(sys.executable, str(args.model), args.imgsz, args.batch_size, n, args.loops,
                                args.pace, args.drop_policy, args.max_lag_s, str(run_dir))
-    base_mem = nvml.nvmlDeviceGetMemoryInfo(handle).used / 2**20
+    base_mem = settled_memory_mb(lambda: nvml.nvmlDeviceGetMemoryInfo(handle).used / 2**20)
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     kwargs = {}
     # Its own process group (session) keeps Ctrl-C away from the launcher: the benchmark stops the tree itself.
@@ -472,9 +487,7 @@ def main() -> int:
     )
     points, stop_reason, status = [], None, 0
     try:
-        for index, n in enumerate(counts):
-            if index:
-                time.sleep(3.0)  # let the previous processes release GPU memory before the next baseline
+        for n in counts:
             point = run_point(args, n, nvml, psutil, handle, out_dir, replacements)
             points.append(point)
             print(json.dumps({k: v for k, v in point.items() if k not in ("per_process", "command")}), flush=True)

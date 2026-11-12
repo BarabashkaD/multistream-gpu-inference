@@ -160,6 +160,14 @@ class PathTests(unittest.TestCase):
         expected = str(Path('<repo>') / 'run_demo.py')
         self.assertEqual(data, f"$ python {expected}\n".encode('utf-8') + f"at {expected}\n".encode('utf-16-le'))
 
+    def test_baseline_waits_for_memory_to_settle(self):
+        readings = iter([2900.0, 2600.0, 2210.0, 2200.0, 2199.0])
+        sleeps = []
+        self.assertEqual(bench.settled_memory_mb(lambda: next(readings), sleeps.append), 2200.0)
+        self.assertEqual(len(sleeps), 3)
+        rising = iter(range(0, 10000, 100))
+        self.assertEqual(bench.settled_memory_mb(lambda: next(rising), lambda s: None, timeout_s=5), 500)
+
     def test_guard_needs_consecutive_samples(self):
         low = sample(0, 1, free_mb=100)
         self.assertIsNone(bench.guard_breach([low, low], 400, 2))
